@@ -11,7 +11,7 @@
  *   - 天気API（Open-Meteo）: ネット優先 → 失敗時キャッシュ（オフラインで前回値を表示）
  */
 
-const CACHE_VERSION = "v0.8-1";
+const CACHE_VERSION = "v0.9-1";
 const CACHE_NAME = `storm-gyudon-${CACHE_VERSION}`;
 
 const THREE_CDN = "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js";
@@ -56,8 +56,8 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // 天気API・逆ジオAPI: ネット優先＋成功時キャッシュ、失敗時は前回キャッシュ
-  if (url.hostname.endsWith("open-meteo.com")) {
+  // 天気API・グルメニュースAPI: ネット優先＋成功時キャッシュ、失敗時は前回キャッシュ
+  if (url.hostname.endsWith("open-meteo.com") || url.hostname.endsWith("rss2json.com")) {
     event.respondWith(networkFirst(event.request));
     return;
   }

@@ -105,6 +105,30 @@
     justify-content: space-between;
   }
 
+  /* ============ グルメニュースティッカー（拡張機能） ============ */
+  #news-ticker {
+    margin: 0 16px 8px;
+    padding: 6px 0;
+    overflow: hidden;
+    background: rgba(10, 16, 32, 0.6);
+    border: 1px solid rgba(200, 170, 100, 0.14);
+    border-radius: 10px;
+    font-size: 12px;
+    z-index: 10;
+  }
+  #news-track {
+    display: inline-block;
+    white-space: nowrap;
+    padding-left: 100%; /* 右端の外からゆっくり流入させる */
+    animation: ticker-flow 40s linear infinite;
+    color: #cfd6e4;
+  }
+  @keyframes ticker-flow {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-100%); }
+  }
+  #app.minimal #news-ticker { display: none; }
+
   /* ============ 操作ボタンエリア（動作はSTEP 5で実装） ============ */
   #buttons {
     display: grid;
@@ -221,6 +245,9 @@
     </div>
   </section>
 
+  <!-- グルメニュースティッカー（拡張機能。取得失敗時は非表示のまま） -->
+  <div id="news-ticker" class="hidden"><span id="news-track"></span></div>
+
   <!-- 操作ボタン5つ（UI指示書E） -->
   <nav id="buttons">
     <button id="btn-minimal"><img class="btn-icon" src="assets/btn-minimal.png" alt="">待受モード</button>
@@ -251,7 +278,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.8";
+const APP_VERSION = "v0.9";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -354,6 +381,17 @@ const CONFIG = {
 
   // trueで描画を簡易化（古い端末向け）
   LOW_SPEC_MODE: false,
+
+  // グルメニュースティッカー（ユーザー指示による拡張機能。設計書v1.1には未記載）
+  // RSSはCORS非対応のため、キー不要のRSS→JSON変換サービス(rss2json)経由で取得する。
+  // 取得失敗・サービス停止時はティッカーを非表示にして本体は影響を受けない
+  NEWS: {
+    ENABLED: true,
+    FEED_URL: "https://gourmet.watch.impress.co.jp/data/rss/1.0/grw/feed.rdf", // グルメWatch
+    CONVERTER: "https://api.rss2json.com/v1/api.json?rss_url=",
+    UPDATE_INTERVAL_MIN: 30, // ニュースの自動更新間隔（分）
+    MAX_ITEMS: 8,            // ティッカーに流す最大件数
+  },
 };
 
 /* =====================================================================
@@ -368,6 +406,9 @@ let lastLocation = null; // { lat, lon, isDefault }
 
 /** 失敗時の再試行タイマーID（多重予約を防ぐ） */
 let retryTimerId = null;
+
+/** グルメニュースの見出しリスト（取得失敗時は空のまま＝ティッカー非表示） */
+let newsItems = [];
 
 /** アプリ状態（設計書6章）。eggMode/minimalUIのlocalStorage保存はSTEP 5で実装 */
 let appState = {
@@ -509,6 +550,30 @@ function resolvePrecipProbability(data) {
  */
 async function fetchPlaceName(lat, lon) {
   return "現在地";
+}
+
+/**
+ * グルメニュースの取得（拡張機能）。
+ * 失敗しても致命的でないため静かに劣化させる（ティッカー非表示・再試行は次回定期更新任せ）
+ */
+async function fetchGourmetNews() {
+  if (!CONFIG.NEWS.ENABLED) return;
+  try {
+    const res = await fetch(CONFIG.NEWS.CONVERTER + encodeURIComponent(CONFIG.NEWS.FEED_URL));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.status !== "ok" || !Array.isArray(data.items)) {
+      throw new Error("RSS変換サービスの応答が不正");
+    }
+    newsItems = data.items
+      .slice(0, CONFIG.NEWS.MAX_ITEMS)
+      .map((item) => (item.title || "").trim())
+      .filter(Boolean);
+    renderNewsTicker();
+  } catch (err) {
+    console.warn("グルメニュースの取得に失敗（ティッカー非表示で継続）:", err.message);
+    if (newsItems.length === 0) renderNewsTicker(); // 初回失敗時は確実に非表示へ
+  }
 }
 
 /** 5分後の再試行を予約する（多重予約はしない） */
@@ -1179,6 +1244,20 @@ function updateOverlay() {
   updateBackground(); // 天気が変われば背景も追従（シーン未構築時は内部でスキップ）
 }
 
+/** ニュースティッカーの描画。見出しを「◆」区切りで流し、長さに応じて速度を一定に保つ */
+function renderNewsTicker() {
+  const ticker = document.getElementById("news-ticker");
+  const track = document.getElementById("news-track");
+  if (newsItems.length === 0) {
+    ticker.classList.add("hidden");
+    return;
+  }
+  track.textContent = newsItems.join("　◆　");
+  ticker.classList.remove("hidden");
+  const duration = Math.max(20, Math.round(track.scrollWidth / 55)); // 約55px/秒
+  track.style.animationDuration = `${duration}s`;
+}
+
 /** 画面下部のStorm名・Pattern名表示（例: Storm: 牛丼乱気流 / Pattern: 浮遊型） */
 function updateStormLabel() {
   document.getElementById("storm-name").textContent =
@@ -1344,6 +1423,10 @@ async function init() {
       fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
     }
   }, CONFIG.UPDATE_INTERVAL_MIN * 60 * 1000);
+
+  // グルメニュース（拡張機能）: 初回取得＋定期更新。失敗してもアプリ本体に影響しない
+  fetchGourmetNews();
+  setInterval(fetchGourmetNews, CONFIG.NEWS.UPDATE_INTERVAL_MIN * 60 * 1000);
 
   // Service Worker登録（PWA・オフライン対応）。非対応・file://等では静かにスキップ。
   // sw.jsのCACHE_VERSIONはindex.html更新のたびに必ず上げること（仕様書10章）
