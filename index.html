@@ -63,9 +63,14 @@
   #scene-container canvas { position: absolute; inset: 0; z-index: 2; }
   #skyline { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1; opacity: 0.6; }
   #scene-fallback {
-    position: absolute; inset: 0; z-index: 3;
+    position: absolute; inset: 0; z-index: 4;
     display: flex; align-items: center; justify-content: center;
     font-size: 14px; opacity: 0.8; text-align: center;
+  }
+  /* 白濁型のミルク色の霧（turbidityで濃度制御） */
+  #fog-overlay {
+    position: absolute; inset: 0; z-index: 3;
+    background: #dde4ee; opacity: 0; pointer-events: none;
   }
 
   /* ============ 情報パネル ============ */
@@ -184,8 +189,8 @@
     </div>
   </header>
 
-  <!-- 中央〜下部: 具材が浮遊する空間＋丼（STEP 3でThree.js描画） -->
-  <div id="scene-container"></div>
+  <!-- 中央〜下部: 具材が浮遊する空間＋丼 -->
+  <div id="scene-container"><div id="fog-overlay"></div></div>
 
   <!-- 情報パネル: 地点/気温/体感/天気/降水確率/湿度/風速/Storm名（STEP 2で実データ表示） -->
   <section id="info-panel">
@@ -234,7 +239,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.3";
+const APP_VERSION = "v0.4";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -352,7 +357,25 @@ let lastLocation = null; // { lat, lon, isDefault }
 /** 失敗時の再試行タイマーID（多重予約を防ぐ） */
 let retryTimerId = null;
 
-// STEP 4以降で実装: appState / bowlParams / targetParams
+/** アプリ状態（設計書6章）。eggMode/minimalUIのlocalStorage保存はSTEP 5で実装 */
+let appState = {
+  pattern: "澄み型",       // 現在の変化パターン（6種）
+  viewMode: "auto",        // "auto"=天気連動 / "manual"=鑑賞モード（STEP 5）
+  patternHistory: [],      // 「戻す」用の履歴・上限20件（STEP 5）
+  eggMode: "raw",          // 生卵 ⇔ 温玉（STEP 5）
+  minimalUI: false,        // 待受モード（STEP 5）
+};
+
+/**
+ * 牛丼パラメータ（各0〜1。設計書4-4）。
+ * bowlParamsは表示中の現在値で、animate()内のlerpでtargetParamsへ滑らかに接近する。
+ * 「ぬるっと」遷移の要のため、bowlParamsへの直接代入は禁止（引き継ぎ仕様書10章）。
+ */
+let bowlParams   = { riceAmount: 0, meatAmount: 0, scatter: 0, turbidity: 0, drift: 0, steam: 0 };
+let targetParams = { ...bowlParams };
+
+/** パターン切替時刻（秒）。updateParticles()が遷移中の追従を滑らかにするのに使う */
+let patternChangedAt = -10;
 
 /* =====================================================================
  * ③ API取得 … getLocation() / fetchWeather() / fetchPlaceName()
@@ -425,7 +448,7 @@ async function fetchWeather(lat, lon, { isDefault = false } = {}) {
     }
     hideError();
     updateOverlay();
-    // STEP 4で実装: decidePattern() → weatherToBowl() → targetParams更新
+    setPattern(decidePattern(weatherState));
     // STEP 5で実装: viewMode="auto"へ復帰（鑑賞モード解除）
   } catch (err) {
     console.error("天気の取得に失敗しました:", err);
@@ -487,7 +510,81 @@ function scheduleRetry() {
 /* =====================================================================
  * ④ 変換ロジック … decidePattern() / weatherToBowl()（心臓部）
  * ===================================================================== */
-// STEP 4で実装
+
+/** 「雨が強いほど数が増える」（設計書4-2 浮遊型）に使う強雨系WMOコード */
+const HEAVY_RAIN_CODES = [63, 65, 67, 81, 82];
+
+/** PATTERN_TABLEの1定義が現在の天気に該当するか */
+function matchesPattern(def, state) {
+  if (def.wmo && def.wmo.includes(state.code)) return true;
+  if (def.coldDay && state.temperature < CONFIG.COLD_DAY_TEMP) return true;
+  if (def.hotDay && state.temperature >= CONFIG.HOT_DAY_TEMP) return true;
+  if (def.windOver && state.windSpeed >= CONFIG.WIND_BRANCH_SPEED) return true;
+  return false;
+}
+
+/**
+ * 心臓部1: weatherState→6パターンのどれかを決定。
+ * CONFIG.PATTERN_PRIORITYの順（結晶>白濁>枝状>浮遊>沈殿>澄み）に判定し、
+ * どれにも該当しない場合（曇り等）は最後の澄み型を既定とする。
+ */
+function decidePattern(state) {
+  for (const name of CONFIG.PATTERN_PRIORITY) {
+    if (matchesPattern(CONFIG.PATTERN_TABLE[name], state)) return name;
+  }
+  return CONFIG.PATTERN_PRIORITY[CONFIG.PATTERN_PRIORITY.length - 1];
+}
+
+/** [x, y]配列テーブルの線形補間（範囲外は端の値）。TEMP_TABLE用 */
+function lerpTable(table, x) {
+  if (x <= table[0][0]) return table[0][1];
+  for (let i = 0; i < table.length - 1; i++) {
+    const [x0, y0] = table[i];
+    const [x1, y1] = table[i + 1];
+    if (x <= x1) return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+  }
+  return table[table.length - 1][1];
+}
+
+/**
+ * 心臓部2: パターン＋気温テーブル→牛丼パラメータ（設計書4-3/4-4）。
+ * 戻り値はtargetParamsに入れ、bowlParamsへはanimate()のlerpで到達させること。
+ */
+function weatherToBowl(state, pattern) {
+  const p = CONFIG.PATTERN_TABLE[pattern].params;
+  const cat = wmoToCategory(state.code);
+
+  let meatAmount = (CONFIG.MEAT_BY_CATEGORY[cat] !== undefined) ? CONFIG.MEAT_BY_CATEGORY[cat] : 0.6;
+  if (pattern === "浮遊型" && HEAVY_RAIN_CODES.includes(state.code)) {
+    meatAmount = Math.min(1, meatAmount * 1.3); // 雨が強いほど浮遊する具材が増える
+  }
+
+  // 湿度は白濁の補正に使う（設計書4-1）: 60%超で最大+0.25まで濁す
+  const turbidity = Math.min(1, p.turbidity + Math.max(0, state.humidity - 60) / 100 * 0.25);
+
+  // 風速は横流れの補正に使う: しきい値比で最大+0.3
+  const drift = Math.min(1, p.drift + Math.min(state.windSpeed / CONFIG.WIND_BRANCH_SPEED, 1) * 0.3);
+
+  return {
+    riceAmount: lerpTable(CONFIG.TEMP_TABLE, state.temperature),
+    meatAmount,
+    scatter: p.scatter,
+    turbidity,
+    drift,
+    steam: p.steam,
+  };
+}
+
+/**
+ * パターンを適用しtargetParamsを更新する（遷移はanimate()のlerp任せ）。
+ * 鑑賞モード（manual指定・履歴push・バッジ表示）はSTEP 5で実装。
+ */
+function setPattern(name) {
+  appState.pattern = name;
+  if (weatherState) targetParams = weatherToBowl(weatherState, name);
+  patternChangedAt = performance.now() / 1000;
+  updateStormLabel();
+}
 
 /* =====================================================================
  * ⑤ Three.jsシーン … initScene() / updateBackground() / animate()
@@ -541,6 +638,7 @@ function initScene() {
   buildBowl(lowSpec);
   buildIngredients(lowSpec);
   buildBackgroundEffects(lowSpec);
+  buildSteam(lowSpec);
 
   window.addEventListener("resize", onResize);
   sceneReady = true;
@@ -645,7 +743,18 @@ function buildIngredients(lowSpec) {
         ? new THREE.MeshStandardMaterial({ color: ing.color, roughness: 0.15, metalness: 0.1 })
         : new THREE.MeshStandardMaterial({ color: ing.color, roughness: 0.65, flatShading: true });
     const mesh = new THREE.InstancedMesh(geom, mat, ing.maxCount);
-    mesh.count = 0; // 表示数はSTEP 4のupdateParticles()がcountで制御（maxCountは生成時固定）
+    mesh.count = 0; // 表示数はupdateParticles()がcountで制御（maxCountは生成時固定）
+    // パターン運動用の乱数シードと現在位置バッファ
+    const seeds = [];
+    const pos = new Float32Array(ing.maxCount * 3);
+    for (let i = 0; i < ing.maxCount; i++) {
+      seeds.push({ r1: Math.random(), r2: Math.random(), r3: Math.random(), r4: Math.random() });
+      pos[i * 3] = (Math.random() - 0.5) * 3.2;
+      pos[i * 3 + 1] = 1 + Math.random() * 2.5;
+      pos[i * 3 + 2] = (Math.random() - 0.5) * 1.4;
+    }
+    mesh.userData.seeds = seeds;
+    mesh.userData.pos = pos;
     scene.add(mesh);
     ingredientMeshes[ing.name] = mesh;
   }
@@ -747,7 +856,35 @@ function updateBackground() {
   bgEffects.snow.visible = (wx.particles === "snow");
 }
 
-/** 背景の雨/雪パーティクルの落下（具材のパターン運動はSTEP 4のupdateParticles()） */
+/** 丸いソフト粒子テクスチャ（Pointsの点は素では正方形に描画されるため） */
+function makeSoftCircleTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d");
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, "rgba(255,255,255,0.9)");
+  g.addColorStop(0.5, "rgba(255,255,255,0.35)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+
+/** 湯気（丼の上に立ちのぼる。量はbowlParams.steamで制御） */
+function buildSteam(lowSpec) {
+  const n = lowSpec ? 15 : 30;
+  const arr = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    arr[i * 3] = (Math.random() - 0.5) * 0.9;
+    arr[i * 3 + 1] = 1.0 + Math.random() * 1.4;
+    arr[i * 3 + 2] = (Math.random() - 0.5) * 0.5;
+  }
+  bgEffects.steam = makePoints(arr, 0xf0f0f0, 0.4, 0);
+  bgEffects.steam.material.map = makeSoftCircleTexture();
+  bgEffects.steam.material.needsUpdate = true;
+}
+
+/** 背景の雨/雪の落下と湯気の上昇（具材のパターン運動はupdateParticles()） */
 function updateBgParticles(dt) {
   for (const [name, speed] of [["rain", 5.5], ["snow", 0.7]]) {
     const pts = bgEffects[name];
@@ -761,16 +898,168 @@ function updateBgParticles(dt) {
     }
     pos.needsUpdate = true;
   }
+  const steam = bgEffects.steam;
+  if (steam && steam.visible) {
+    const pos = steam.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      let y = pos.getY(i) + (0.35 + (i % 5) * 0.05) * dt;
+      if (y > 2.6) y = 1.0;
+      pos.setY(i, y);
+      pos.setX(i, pos.getX(i) + Math.sin(y * 3 + i) * 0.12 * dt);
+    }
+    pos.needsUpdate = true;
+  }
+}
+
+/* ---- パターン別の具材運動（アプリの心臓部・引き継ぎ仕様書5章） ---- */
+
+const LERP_RATE = 0.02; // targetParamsへの接近率。「ぬるっと」遷移の要（変更・削除禁止）
+
+/** bowlParams→targetParamsへ毎フレームlerpで接近させる（直接代入禁止） */
+function lerpParams() {
+  for (const k in bowlParams) {
+    bowlParams[k] += (targetParams[k] - bowlParams[k]) * LERP_RATE;
+  }
+}
+
+/** bowlParamsをフォグ・ミルク色オーバーレイ・湯気に反映する */
+let fogOverlayEl = null;
+function updateEffects() {
+  fogEffect.density = bowlParams.turbidity * 0.3;
+  if (!fogOverlayEl) fogOverlayEl = document.getElementById("fog-overlay");
+  fogOverlayEl.style.opacity = (bowlParams.turbidity * 0.5).toFixed(3);
+  const steam = bgEffects.steam;
+  if (steam) {
+    steam.visible = bowlParams.steam > 0.02;
+    steam.material.opacity = bowlParams.steam * 0.4;
+  }
+}
+
+/** 具材種別→表示数の割合（0〜1）。天気取得前は表示しない */
+function countFraction(name) {
+  if (!weatherState) return 0;
+  const pat = appState.pattern;
+  let frac;
+  if (name === "rice") frac = bowlParams.riceAmount;
+  else if (name === "meat") frac = bowlParams.meatAmount;
+  else if (name === "sparkle") frac = (pat === "澄み型") ? 0.5 : 0.3;
+  else frac = bowlParams.meatAmount * 0.8; // 玉ねぎ・つゆ滴・紅しょうが・追加具材
+  if (pat === "澄み型" && name !== "sparkle") frac *= 0.1; // 澄み型は少数が漂うのみ
+  return Math.min(1, frac);
+}
+
+/**
+ * パターン別の目標位置を計算する（out={x,y,z}に書き込む）。
+ * 座標系: 丼中心が原点。可視域はおよそ x±1.8 / y 0〜3.9 / z±0.9
+ */
+const TMP_POS = { x: 0, y: 0, z: 0 };
+function computePatternTarget(pattern, s, i, t, out) {
+  const sc = bowlParams.scatter;
+  const dr = bowlParams.drift;
+  switch (pattern) {
+    case "澄み型": { // 具材はほぼ丼に収まり静止。少数がキラキラとゆっくり漂う
+      const ang = s.r2 * Math.PI * 2 + t * 0.05 * (s.r3 - 0.5);
+      const R = 0.25 + s.r1 * 0.75; // ほぼ丼の半径内
+      out.x = Math.cos(ang) * R;
+      out.y = 0.85 + s.r4 * 0.8 + Math.sin(t * 0.4 + i) * 0.08; // 丼のすぐ上に低く漂う
+      out.z = Math.sin(ang) * R * 0.4;
+      break;
+    }
+    case "白濁型": { // ミルク色の霧の中、米粒が雪のように舞い降りる
+      const speed = 0.25 + s.r3 * 0.3;
+      out.x = (s.r1 - 0.5) * 3.4 + Math.sin(t * 0.5 + i) * 0.25;
+      out.y = 3.9 - ((t * speed + s.r2 * 3.5) % 3.5);
+      out.z = (s.r4 - 0.5) * 1.6;
+      break;
+    }
+    case "浮遊型": { // 中層〜上層にふわふわ浮遊
+      out.x = (s.r1 - 0.5) * 3.2 + Math.sin(t * 0.3 + i * 1.7) * (0.2 + sc * 0.4);
+      out.y = 1.3 + s.r2 * 2.2 + Math.sin(t * 0.5 + i) * (0.15 + sc * 0.3);
+      out.z = (s.r3 - 0.5) * 1.5;
+      break;
+    }
+    case "沈殿型": { // 丼にどっしり沈殿・堆積（＋湯気はupdateEffects側）
+      const R = s.r1 * 0.85;
+      const ang = s.r2 * Math.PI * 2;
+      out.x = Math.cos(ang) * R;
+      out.y = 0.5 + 0.475 * Math.sqrt(Math.max(0, 1 - (R / 0.95) ** 2)) + 0.05
+            + Math.sin(t * 0.8 + i) * 0.01;
+      out.z = Math.sin(ang) * R;
+      break;
+    }
+    case "結晶型": { // 上部に結晶状の枝＋全体が激しく散らばる（大荒れ牛丼）
+      if (s.r4 < 0.5) {
+        out.x = (s.r1 - 0.5) * 3.6 + Math.sin(t * (1.5 + s.r2) + i) * 0.9;
+        out.y = 0.9 + s.r2 * 3.0 + Math.cos(t * 1.7 + i * 2) * 0.7;
+        out.z = (s.r3 - 0.5) * 1.6;
+      } else {
+        const arm = Math.floor(s.r1 * 6); // 6本の放射枝
+        const armAng = arm * Math.PI / 3 + Math.sin(t * 0.3) * 0.05;
+        const d = s.r2 * 1.5;
+        out.x = Math.cos(armAng) * d;
+        out.y = 3.0 + Math.sin(armAng) * d * 0.45;
+        out.z = -0.5;
+      }
+      break;
+    }
+    case "枝状型": { // 筋状・枝状の流線に沿って横方向にたなびく
+      const row = Math.floor(s.r1 * 5);
+      const speed = (0.5 + s.r3 * 0.8) * (0.4 + dr);
+      out.x = ((s.r2 * 3.8 + t * speed) % 3.8) - 1.9;
+      out.y = 1.1 + row * 0.55 + Math.sin(out.x * 1.6 + row * 2) * 0.15;
+      out.z = (s.r4 - 0.5) * 1.2;
+      break;
+    }
+  }
+}
+
+/** 流れ系パターン（座標がラップ移動する）は追従補間せず直接配置する */
+const FLOW_PATTERNS = ["白濁型", "枝状型"];
+const particleDummy = new THREE.Object3D();
+
+/** パターン別の具材運動。パターン切替後1.5秒は目標へ緩やかに追従して「ぬるっと」遷移 */
+function updateParticles(dt, t) {
+  const inTransition = (t - patternChangedAt) < 1.5;
+  const direct = !inTransition && FLOW_PATTERNS.includes(appState.pattern);
+  const ease = Math.min(1, dt * 2.5);
+  for (const ing of CONFIG.INGREDIENTS) {
+    const mesh = ingredientMeshes[ing.name];
+    if (!mesh) continue;
+    mesh.count = Math.round(countFraction(ing.name) * ing.maxCount);
+    if (mesh.count === 0) continue;
+    const seeds = mesh.userData.seeds;
+    const pos = mesh.userData.pos;
+    for (let i = 0; i < mesh.count; i++) {
+      computePatternTarget(appState.pattern, seeds[i], i, t, TMP_POS);
+      const j = i * 3;
+      if (direct) {
+        pos[j] = TMP_POS.x; pos[j + 1] = TMP_POS.y; pos[j + 2] = TMP_POS.z;
+      } else {
+        pos[j]     += (TMP_POS.x - pos[j]) * ease;
+        pos[j + 1] += (TMP_POS.y - pos[j + 1]) * ease;
+        pos[j + 2] += (TMP_POS.z - pos[j + 2]) * ease;
+      }
+      particleDummy.position.set(pos[j], pos[j + 1], pos[j + 2]);
+      particleDummy.rotation.set(t * (0.3 + seeds[i].r3), t * 0.5 * seeds[i].r4, 0);
+      particleDummy.updateMatrix();
+      mesh.setMatrixAt(i, particleDummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+  }
 }
 
 let lastFrameTime = 0;
 
-/** rAFループ。STEP 4でbowlParams→targetParamsのlerpとupdateParticles()がここに載る */
+/** rAFループ: lerp遷移 → エフェクト反映 → 背景・具材の運動 → 描画 */
 function animate(t) {
   requestAnimationFrame(animate);
   const dt = Math.min((t - lastFrameTime) / 1000, 0.1);
   lastFrameTime = t;
+  const tSec = t / 1000;
+  lerpParams();
+  updateEffects();
   updateBgParticles(dt);
+  updateParticles(dt, tSec);
   renderer.render(scene, camera);
 }
 
@@ -837,9 +1126,15 @@ function updateOverlay() {
   document.getElementById("updated-at").textContent = w.fetchedAt
     ? `更新 ${String(w.fetchedAt.getHours()).padStart(2, "0")}:${String(w.fetchedAt.getMinutes()).padStart(2, "0")}`
     : "デモ表示中";
-  // Storm名・Pattern名の表示はSTEP 4で実装
 
   updateBackground(); // 天気が変われば背景も追従（シーン未構築時は内部でスキップ）
+}
+
+/** 画面下部のStorm名・Pattern名表示（例: Storm: 牛丼乱気流 / Pattern: 浮遊型） */
+function updateStormLabel() {
+  document.getElementById("storm-name").textContent =
+    `Storm: ${CONFIG.STORM_NAMES[appState.pattern] || "--"}`;
+  document.getElementById("pattern-name").textContent = `Pattern: ${appState.pattern}`;
 }
 
 /** ローディング表示（UI指示書F） */
