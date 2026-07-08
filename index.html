@@ -226,7 +226,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.1";
+const APP_VERSION = "v0.2";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -332,16 +332,149 @@ const CONFIG = {
 };
 
 /* =====================================================================
- * ② 状態 … weatherState / appState / bowlParams（STEP 2以降で使用）
+ * ② 状態 … weatherState / appState / bowlParams（設計書6章）
  * ===================================================================== */
-// STEP 2で実装: weatherState = { code, temperature, apparentTemp, windSpeed,
-//                humidity, precipProbability, fetchedAt, place }
+
+/** 最新の天気状態。取得成功（またはデモ表示）までnull */
+let weatherState = null;
+
+/** 天気取得に使う座標。自動更新・再試行・手動更新で再利用する */
+let lastLocation = null; // { lat, lon, isDefault }
+
+/** 失敗時の再試行タイマーID（多重予約を防ぐ） */
+let retryTimerId = null;
+
 // STEP 4以降で実装: appState / bowlParams / targetParams
 
 /* =====================================================================
- * ③ API取得 … fetchWeather() / fetchPlaceName() / getLocation()
+ * ③ API取得 … getLocation() / fetchWeather() / fetchPlaceName()
  * ===================================================================== */
-// STEP 2で実装（Open-Meteo・Geolocation・ローディング/エラーUI・自動更新）
+
+const WEATHER_API_BASE = "https://api.open-meteo.com/v1/forecast";
+const RETRY_DELAY_MIN = 5; // 取得失敗時の再試行間隔（分・設計書9章）
+
+/**
+ * Geolocationで現在地を取得する。
+ * 拒否・失敗・非対応（permission系）はCONFIG.DEFAULT_LOCATIONで続行（設計書9章）。
+ * このPromiseはrejectしない（必ずどこかの座標に解決する）。
+ */
+function getLocation() {
+  return new Promise((resolve) => {
+    const fallback = {
+      lat: CONFIG.DEFAULT_LOCATION.lat,
+      lon: CONFIG.DEFAULT_LOCATION.lon,
+      isDefault: true,
+    };
+    if (!("geolocation" in navigator)) {
+      console.warn("この環境はGeolocation非対応です。デフォルト地点で続行します。");
+      resolve(fallback);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, isDefault: false }),
+      (err) => {
+        console.warn("位置情報を取得できませんでした。デフォルト地点で続行します:", err.message);
+        resolve(fallback);
+      },
+      { timeout: 10000, maximumAge: 600000 }
+    );
+  });
+}
+
+/**
+ * Open-Meteoから現在の天気を取得してweatherStateを更新する。
+ * 失敗時（network系）: 前回値があれば継続、なければ「晴れ・20℃」のデモ表示。
+ * いずれもエラーUIを表示し、5分後に再試行する（設計書9章）。
+ *
+ * 実レスポンス検証メモ（2026-07-08 実施）:
+ * - precipitation_probability は current で取得可能なことを確認済み。
+ *   仕様変動に備え、currentで欠損した場合のみ hourly の直近値で代替する（引き継ぎ仕様書10章）
+ * - 風速の既定単位は km/h のため wind_speed_unit=ms を必ず指定する（枝状型判定は m/s 前提）
+ */
+async function fetchWeather(lat, lon, { isDefault = false } = {}) {
+  const url = `${WEATHER_API_BASE}?latitude=${lat}&longitude=${lon}` +
+    "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,precipitation_probability" +
+    "&hourly=precipitation_probability&forecast_days=1" +
+    "&wind_speed_unit=ms&timezone=auto";
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const cur = data.current;
+    weatherState = {
+      code: cur.weather_code,
+      temperature: cur.temperature_2m,
+      apparentTemp: cur.apparent_temperature,
+      windSpeed: cur.wind_speed_10m, // m/s（wind_speed_unit=ms指定）
+      humidity: cur.relative_humidity_2m,
+      precipProbability: resolvePrecipProbability(data),
+      fetchedAt: new Date(),
+      place: isDefault ? CONFIG.DEFAULT_LOCATION.name : await fetchPlaceName(lat, lon),
+    };
+    if (retryTimerId !== null) {
+      clearTimeout(retryTimerId);
+      retryTimerId = null;
+    }
+    hideError();
+    updateOverlay();
+    // STEP 4で実装: decidePattern() → weatherToBowl() → targetParams更新
+    // STEP 5で実装: viewMode="auto"へ復帰（鑑賞モード解除）
+  } catch (err) {
+    console.error("天気の取得に失敗しました:", err);
+    if (!weatherState) {
+      // 初回起動でAPIも失敗 → 「晴れ・20℃」のデモ表示＋エラーメッセージ（設計書9章）
+      weatherState = {
+        code: 0, temperature: 20, apparentTemp: 20, windSpeed: 2,
+        humidity: 50, precipProbability: 0, fetchedAt: null,
+        place: isDefault ? CONFIG.DEFAULT_LOCATION.name : "現在地",
+      };
+      updateOverlay();
+    }
+    showError();
+    scheduleRetry();
+  }
+}
+
+/** currentのprecipitation_probabilityが欠損している場合、hourlyの直近値で代替する */
+function resolvePrecipProbability(data) {
+  const curVal = data.current ? data.current.precipitation_probability : null;
+  if (curVal !== null && curVal !== undefined) return curVal;
+  const hourly = data.hourly;
+  if (hourly && hourly.time && hourly.precipitation_probability) {
+    // currentの観測時刻以前で最も新しい時刻の値を採用する
+    const curTime = data.current && data.current.time ? data.current.time : null;
+    let idx = 0;
+    if (curTime) {
+      for (let i = 0; i < hourly.time.length; i++) {
+        if (hourly.time[i] <= curTime) idx = i;
+      }
+    }
+    const v = hourly.precipitation_probability[idx];
+    if (v !== null && v !== undefined) return v;
+  }
+  return null; // 取得不能。表示は「--%」になる
+}
+
+/**
+ * 緯度経度→地名の逆引き。
+ * 実レスポンス検証メモ（2026-07-08 実施）: Open-Meteo Geocoding APIは name パラメータ必須
+ * （座標からの逆引き非対応）を確認。引き継ぎ仕様書7章の指定どおり地名表示を省略し
+ * 「現在地」表記とする。逆引き可能なAPIへの差し替えは指示書上ユーザー確認が必要。
+ */
+async function fetchPlaceName(lat, lon) {
+  return "現在地";
+}
+
+/** 5分後の再試行を予約する（多重予約はしない） */
+function scheduleRetry() {
+  if (retryTimerId !== null) return;
+  retryTimerId = setTimeout(() => {
+    retryTimerId = null;
+    if (lastLocation) {
+      fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
+    }
+  }, RETRY_DELAY_MIN * 60 * 1000);
+}
 
 /* =====================================================================
  * ④ 変換ロジック … decidePattern() / weatherToBowl()（心臓部）
@@ -356,6 +489,60 @@ const CONFIG = {
 /* =====================================================================
  * ⑥ UI … 時計・情報パネル・操作ボタン・待受モード
  * ===================================================================== */
+
+/** 天気カテゴリ→表示ラベル・アイコン */
+const WEATHER_DISPLAY = {
+  clear:   { label: "晴れ", icon: "☀️" },
+  cloudy:  { label: "曇り", icon: "☁️" },
+  fog:     { label: "霧",   icon: "🌫️" },
+  rain:    { label: "雨",   icon: "☂️" },
+  snow:    { label: "雪",   icon: "❄️" },
+  thunder: { label: "雷雨", icon: "⛈️" },
+};
+
+/**
+ * WMO天気コード→カテゴリ（Open-Meteo公式コード表準拠。0〜99で歯抜けあり）
+ * 変更時は公式コード表を確認すること（引き継ぎ仕様書10章）
+ */
+function wmoToCategory(code) {
+  if (code === 0 || code === 1) return "clear";
+  if (code === 2 || code === 3) return "cloudy";
+  if (code === 45 || code === 48) return "fog";
+  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return "rain";
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) return "snow";
+  if (code >= 95 && code <= 99) return "thunder";
+  console.warn("未知のWMOコード:", code, "（曇り扱いで表示を継続）");
+  return "cloudy";
+}
+
+/** 情報パネル・上部の天気表示をweatherStateから更新する */
+function updateOverlay() {
+  if (!weatherState) return;
+  const w = weatherState;
+  const disp = WEATHER_DISPLAY[wmoToCategory(w.code)];
+  const precipText = (w.precipProbability === null || w.precipProbability === undefined)
+    ? "--%" : `${w.precipProbability}%`;
+
+  document.getElementById("place-name").textContent = w.place;
+  document.getElementById("weather-detail").textContent = `${disp.label} / 降水 ${precipText}`;
+  document.getElementById("temp-main").textContent = `${Math.round(w.temperature)}℃`;
+  document.getElementById("feels-like").textContent = ` Feels like ${Math.round(w.apparentTemp)}℃`;
+  document.getElementById("humidity-wind").textContent = `湿度 ${w.humidity}% / 風速 ${Number(w.windSpeed).toFixed(1)}m/s`;
+  document.getElementById("weather-icon").textContent = disp.icon;
+  document.getElementById("weather-label").textContent = disp.label;
+  document.getElementById("updated-at").textContent = w.fetchedAt
+    ? `更新 ${String(w.fetchedAt.getHours()).padStart(2, "0")}:${String(w.fetchedAt.getMinutes()).padStart(2, "0")}`
+    : "デモ表示中";
+  // Storm名・Pattern名の表示はSTEP 4で実装
+}
+
+/** ローディング表示（UI指示書F） */
+function showLoading() { document.getElementById("loading").classList.remove("hidden"); }
+function hideLoading() { document.getElementById("loading").classList.add("hidden"); }
+
+/** エラー表示（UI指示書F。前回値があれば背後で表示継続） */
+function showError() { document.getElementById("error-banner").classList.remove("hidden"); }
+function hideError() { document.getElementById("error-banner").classList.add("hidden"); }
 
 /** 時計・日付を更新する（1秒ごと） */
 function updateClock() {
@@ -372,7 +559,7 @@ function updateClock() {
  * ⑦ 起動処理 … init()
  * ===================================================================== */
 
-function init() {
+async function init() {
   // バージョン表示（画面右下に常時）
   document.getElementById("version").textContent = APP_VERSION;
 
@@ -384,7 +571,27 @@ function init() {
     document.getElementById("clock").classList.add("hidden");
   }
 
-  // STEP 2以降: ローディング表示→位置取得→天気取得→シーン構築→ループ開始→タイマー設定
+  // ローディング表示 → 位置取得 → 天気取得（設計書3章 STEP1〜3）
+  showLoading();
+  try {
+    lastLocation = await getLocation();
+    await fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
+  } catch (err) {
+    // unexpected系: ここに来るのは想定外の例外のみ（network/permissionは各関数内で処理済み）
+    console.error("初期化中に予期しないエラーが発生しました:", err);
+    showError();
+  } finally {
+    hideLoading();
+  }
+
+  // 30分ごとの自動更新（設計書3章 STEP7。STEP 5で「鑑賞モード解除」もここに載る）
+  setInterval(() => {
+    if (lastLocation) {
+      fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
+    }
+  }, CONFIG.UPDATE_INTERVAL_MIN * 60 * 1000);
+
+  // STEP 3以降: initScene() → animate()ループ開始
 }
 
 init();
