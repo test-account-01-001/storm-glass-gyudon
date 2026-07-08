@@ -53,6 +53,7 @@
     line-height: 1.1;
     font-variant-numeric: tabular-nums;
   }
+  #clock .sec { font-size: 30px; opacity: 0.7; }
   #date-line { font-size: 15px; opacity: 0.85; margin-top: 2px; }
   #app-name { font-size: 13px; opacity: 0.55; margin-top: 4px; }
   #weather-badge { text-align: right; font-size: 13px; opacity: 0.9; }
@@ -250,7 +251,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.7";
+const APP_VERSION = "v0.8";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -1270,7 +1271,8 @@ function updateClock() {
   const now = new Date();
   const hh = String(now.getHours()).padStart(2, "0");
   const mm = String(now.getMinutes()).padStart(2, "0");
-  document.getElementById("clock").textContent = `${hh}:${mm}`;
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  document.getElementById("clock").innerHTML = `${hh}:${mm}<span class="sec">:${ss}</span>`;
   document.getElementById("date-line").textContent = now.toLocaleDateString("ja-JP", {
     month: "long", day: "numeric", weekday: "long",
   });
