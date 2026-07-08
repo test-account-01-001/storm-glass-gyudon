@@ -50,7 +50,7 @@
   #date-line { font-size: 15px; opacity: 0.85; margin-top: 2px; }
   #app-name { font-size: 13px; opacity: 0.55; margin-top: 4px; }
   #weather-badge { text-align: right; font-size: 13px; opacity: 0.9; }
-  #weather-icon { font-size: 22px; display: block; }
+  #weather-icon { width: 30px; height: 30px; display: block; margin: 0 0 2px auto; }
   #updated-at { font-size: 11px; opacity: 0.6; display: block; margin-top: 2px; }
 
   /* ============ 中央エリア: 3Dシーン ============ */
@@ -118,7 +118,12 @@
     cursor: pointer;
   }
   #buttons button:disabled { opacity: 0.45; cursor: default; }
-  #buttons button .btn-icon { display: block; font-size: 16px; margin-bottom: 3px; }
+  #buttons button .btn-icon { display: block; width: 24px; height: 24px; margin: 0 auto 4px; border-radius: 6px; }
+
+  /* 待受モード: 時計＋牛丼のみの最小UI表示（タップで復帰） */
+  #app.minimal #info-panel,
+  #app.minimal #buttons,
+  #app.minimal #weather-badge { display: none; }
 
   /* ============ 状態表示: ローディング／エラー／鑑賞モード ============ */
   #loading {
@@ -183,7 +188,7 @@
       <div id="app-name">ストーム牛丼</div>
     </div>
     <div id="weather-badge">
-      <span id="weather-icon"></span>
+      <img id="weather-icon" src="" alt="" hidden>
       <span id="weather-label">--</span>
       <span id="updated-at"></span>
     </div>
@@ -209,13 +214,13 @@
     </div>
   </section>
 
-  <!-- 操作ボタン5つ（UI指示書E。動作はSTEP 5で実装するため現状は無効） -->
+  <!-- 操作ボタン5つ（UI指示書E） -->
   <nav id="buttons">
-    <button id="btn-minimal"  disabled title="STEP 5で実装"><span class="btn-icon">📱</span>待受モード</button>
-    <button id="btn-refresh"  disabled title="STEP 5で実装"><span class="btn-icon">☁️</span>天気更新</button>
-    <button id="btn-pattern"  disabled title="STEP 5で実装"><span class="btn-icon">🍚</span>パターン変更</button>
-    <button id="btn-undo"     disabled title="STEP 5で実装"><span class="btn-icon">↩️</span>戻す</button>
-    <button id="btn-egg"      disabled title="STEP 5で実装"><span class="btn-icon">🥚</span>卵チェンジ</button>
+    <button id="btn-minimal"><img class="btn-icon" src="assets/btn-minimal.png" alt="">待受モード</button>
+    <button id="btn-refresh"><img class="btn-icon" src="assets/btn-refresh.png" alt="">天気更新</button>
+    <button id="btn-pattern"><img class="btn-icon" src="assets/btn-pattern.png" alt="">パターン変更</button>
+    <button id="btn-undo"><img class="btn-icon" src="assets/btn-undo.png" alt="">戻す</button>
+    <button id="btn-egg"><img class="btn-icon" src="assets/btn-egg.png" alt="">卵チェンジ</button>
   </nav>
 
   <!-- 状態表示（UI指示書F。ローディング/エラーの制御はSTEP 2で実装） -->
@@ -239,7 +244,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.4";
+const APP_VERSION = "v0.5";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -447,9 +452,12 @@ async function fetchWeather(lat, lon, { isDefault = false } = {}) {
       retryTimerId = null;
     }
     hideError();
+    // 取得成功時は必ず実際の天気に復帰（鑑賞モード解除）。
+    // ここを消すと鑑賞モードから永遠に戻れなくなる（仕様書10章）
+    appState.viewMode = "auto";
+    document.getElementById("mode-badge").classList.add("hidden");
     updateOverlay();
     setPattern(decidePattern(weatherState));
-    // STEP 5で実装: viewMode="auto"へ復帰（鑑賞モード解除）
   } catch (err) {
     console.error("天気の取得に失敗しました:", err);
     if (!weatherState) {
@@ -577,11 +585,36 @@ function weatherToBowl(state, pattern) {
 
 /**
  * パターンを適用しtargetParamsを更新する（遷移はanimate()のlerp任せ）。
- * 鑑賞モード（manual指定・履歴push・バッジ表示）はSTEP 5で実装。
+ * manual=true（鑑賞モード）: 天気連動を一時停止し、履歴push＋「鑑賞モード」バッジ表示。
+ * 「天気更新」または30分ごとの自動更新で実際の天気に復帰する（設計書5-2）。
  */
-function setPattern(name) {
+function setPattern(name, { manual = false } = {}) {
+  if (manual) {
+    appState.patternHistory.push(appState.pattern);
+    if (appState.patternHistory.length > 20) appState.patternHistory.shift(); // 上限20件（仕様書10章）
+    appState.viewMode = "manual";
+    document.getElementById("mode-badge").classList.remove("hidden");
+  }
   appState.pattern = name;
   if (weatherState) targetParams = weatherToBowl(weatherState, name);
+  patternChangedAt = performance.now() / 1000;
+  updateStormLabel();
+}
+
+/** 「パターン変更」ボタン: 6パターンを順送り（鑑賞モード） */
+const PATTERN_CYCLE = ["澄み型", "白濁型", "浮遊型", "沈殿型", "結晶型", "枝状型"];
+function cyclePattern() {
+  const idx = PATTERN_CYCLE.indexOf(appState.pattern);
+  setPattern(PATTERN_CYCLE[(idx + 1) % PATTERN_CYCLE.length], { manual: true });
+}
+
+/** 「戻す」ボタン: patternHistoryからpop（履歴が空なら何もしない） */
+function undoPattern() {
+  if (appState.patternHistory.length === 0) return;
+  const prev = appState.patternHistory.pop();
+  // 履歴に再pushしないため、setPatternを経由せず直接適用する
+  appState.pattern = prev;
+  if (weatherState) targetParams = weatherToBowl(weatherState, prev);
   patternChangedAt = performance.now() / 1000;
   updateStormLabel();
 }
@@ -593,6 +626,8 @@ function setPattern(name) {
 
 let scene, camera, renderer;
 let bowlGroup, eggMesh;
+/** 卵のマテリアル（生=光沢オレンジ／温玉=白濁。buildBowl()で生成） */
+const EGG_MATERIALS = {};
 /** 具材種別ごとのInstancedMesh辞書 {rice, meat, onion, drop, ginger, sparkle} */
 let ingredientMeshes = {};
 /** 背景の天候パーティクル・星 */
@@ -695,7 +730,7 @@ function buildBowl(lowSpec) {
     bowlGroup.add(strip);
   }
 
-  // 卵（丼の中央＝盛りの頂上。生卵⇔温玉のマテリアル切替はSTEP 5のtoggleEgg()で実装）
+  // 卵（丼の中央＝盛りの頂上。toggleEgg()がマテイリアルを差し替える）
   const eggWhite = new THREE.Mesh(
     new THREE.CircleGeometry(0.3, seg / 2),
     new THREE.MeshStandardMaterial({ color: 0xf6f0e2, roughness: 0.4, transparent: true, opacity: 0.75 })
@@ -703,9 +738,11 @@ function buildBowl(lowSpec) {
   eggWhite.rotation.x = -Math.PI / 2;
   eggWhite.position.y = moundY(0) + 0.012;
   bowlGroup.add(eggWhite);
+  EGG_MATERIALS.raw = new THREE.MeshStandardMaterial({ color: 0xffa22e, roughness: 0.15, emissive: 0x662f00 });
+  EGG_MATERIALS.onsen = new THREE.MeshStandardMaterial({ color: 0xf3ede2, roughness: 0.55, emissive: 0x1a1208, transparent: true, opacity: 0.96 });
   eggMesh = new THREE.Mesh(
     new THREE.SphereGeometry(0.17, seg / 2, 12),
-    new THREE.MeshStandardMaterial({ color: 0xffa22e, roughness: 0.15, emissive: 0x662f00 })
+    EGG_MATERIALS[appState.eggMode] || EGG_MATERIALS.raw
   );
   eggMesh.scale.set(1, 0.6, 1);
   eggMesh.position.y = moundY(0) + 0.03;
@@ -1083,15 +1120,16 @@ function showSceneFallback() {
  * ⑥ UI … 時計・情報パネル・操作ボタン・待受モード
  * ===================================================================== */
 
-/** 天気カテゴリ→表示ラベル・アイコン */
+/** 天気カテゴリ→表示ラベル・アイコン画像（assets/=ユーザー支給素材。霧は曇り・雷雨は雨の画像を流用） */
 const WEATHER_DISPLAY = {
-  clear:   { label: "晴れ", icon: "☀️" },
-  cloudy:  { label: "曇り", icon: "☁️" },
-  fog:     { label: "霧",   icon: "🌫️" },
-  rain:    { label: "雨",   icon: "☂️" },
-  snow:    { label: "雪",   icon: "❄️" },
-  thunder: { label: "雷雨", icon: "⛈️" },
+  clear:   { label: "晴れ", icon: "assets/wx-clear.png" },
+  cloudy:  { label: "曇り", icon: "assets/wx-cloudy.png" },
+  fog:     { label: "霧",   icon: "assets/wx-cloudy.png" },
+  rain:    { label: "雨",   icon: "assets/wx-rain.png" },
+  snow:    { label: "雪",   icon: "assets/wx-snow.png" },
+  thunder: { label: "雷雨", icon: "assets/wx-rain.png" },
 };
+const WX_WIND_ICON = "assets/wx-wind.png"; // 強風（枝状型しきい値以上）のとき優先表示
 
 /**
  * WMO天気コード→カテゴリ（Open-Meteo公式コード表準拠。0〜99で歯抜けあり）
@@ -1121,7 +1159,11 @@ function updateOverlay() {
   document.getElementById("temp-main").textContent = `${Math.round(w.temperature)}℃`;
   document.getElementById("feels-like").textContent = ` Feels like ${Math.round(w.apparentTemp)}℃`;
   document.getElementById("humidity-wind").textContent = `湿度 ${w.humidity}% / 風速 ${Number(w.windSpeed).toFixed(1)}m/s`;
-  document.getElementById("weather-icon").textContent = disp.icon;
+  const iconEl = document.getElementById("weather-icon");
+  const iconSrc = (w.windSpeed >= CONFIG.WIND_BRANCH_SPEED) ? WX_WIND_ICON : disp.icon;
+  if (iconEl.getAttribute("src") !== iconSrc) iconEl.src = iconSrc;
+  iconEl.alt = disp.label;
+  iconEl.hidden = false;
   document.getElementById("weather-label").textContent = disp.label;
   document.getElementById("updated-at").textContent = w.fetchedAt
     ? `更新 ${String(w.fetchedAt.getHours()).padStart(2, "0")}:${String(w.fetchedAt.getMinutes()).padStart(2, "0")}`
@@ -1140,6 +1182,76 @@ function updateStormLabel() {
 /** ローディング表示（UI指示書F） */
 function showLoading() { document.getElementById("loading").classList.remove("hidden"); }
 function hideLoading() { document.getElementById("loading").classList.add("hidden"); }
+
+/* ---- 操作ボタン・モード（UI指示書E / 設計書5-2） ---- */
+
+const SETTINGS_STORAGE_KEY = "stormGyudonSettings";
+
+/** 卵とUIモードの設定を保存（localStorage不可の環境では静かに諦める） */
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+      eggMode: appState.eggMode,
+      minimalUI: appState.minimalUI,
+    }));
+  } catch (e) { /* プライベートモード等。機能低下のみ */ }
+}
+
+/** 保存済み設定を読み込みappStateへ反映（initの最初期・シーン構築前に呼ぶ） */
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || "{}");
+    if (s.eggMode === "raw" || s.eggMode === "onsen") appState.eggMode = s.eggMode;
+    if (typeof s.minimalUI === "boolean") appState.minimalUI = s.minimalUI;
+  } catch (e) { /* 壊れたデータは既定値で続行 */ }
+}
+
+/** 「卵チェンジ」: 生卵 ⇔ 温玉。localStorageに保存し再読み込み後も維持 */
+function toggleEgg() {
+  appState.eggMode = (appState.eggMode === "raw") ? "onsen" : "raw";
+  if (eggMesh && EGG_MATERIALS[appState.eggMode]) {
+    eggMesh.material = EGG_MATERIALS[appState.eggMode];
+  }
+  saveSettings();
+}
+
+/** 「待受モード」: 時計＋牛丼のみの最小UI。タップで復帰 */
+function toggleMinimalUI(force) {
+  appState.minimalUI = (typeof force === "boolean") ? force : !appState.minimalUI;
+  document.getElementById("app").classList.toggle("minimal", appState.minimalUI);
+  saveSettings();
+}
+
+/** ボタン配線＋待受モードのタップ復帰 */
+function wireButtons() {
+  document.getElementById("btn-minimal").addEventListener("click", () => toggleMinimalUI());
+  document.getElementById("btn-refresh").addEventListener("click", () => {
+    if (lastLocation) {
+      fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
+    }
+  });
+  document.getElementById("btn-pattern").addEventListener("click", cyclePattern);
+  document.getElementById("btn-undo").addEventListener("click", undoPattern);
+  document.getElementById("btn-egg").addEventListener("click", toggleEgg);
+
+  // 待受モード中は画面のどこをタップしても復帰（切替直後のボタン自身のクリックは除外）
+  document.addEventListener("click", (e) => {
+    if (!appState.minimalUI) return;
+    if (e.target.closest("#buttons")) return;
+    toggleMinimalUI(false);
+  });
+}
+
+/** Wake Lock: スリープ防止。非対応・拒否は静かに無視（設計書9章） */
+let wakeLock = null;
+async function requestWakeLock() {
+  if (!("wakeLock" in navigator)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+  } catch (err) {
+    console.warn("Wake Lockを取得できません（スリープ防止のみ無効）:", err.message);
+  }
+}
 
 /** エラー表示（UI指示書F。前回値があれば背後で表示継続） */
 function showError() { document.getElementById("error-banner").classList.remove("hidden"); }
@@ -1169,6 +1281,12 @@ function updateClock() {
  * ===================================================================== */
 
 async function init() {
+  // 保存済み設定（卵・待受モード）を最初に復元
+  loadSettings();
+  if (appState.minimalUI) {
+    document.getElementById("app").classList.add("minimal");
+  }
+
   // バージョン表示（画面右下に常時）
   document.getElementById("version").textContent = APP_VERSION;
 
@@ -1179,6 +1297,13 @@ async function init() {
   } else {
     document.getElementById("clock").classList.add("hidden");
   }
+
+  // 操作ボタン＋Wake Lock（可視復帰時の再取得を含む）
+  wireButtons();
+  requestWakeLock();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") requestWakeLock();
+  });
 
   // ローディング表示 → 位置取得 → 天気取得（設計書3章 STEP1〜3）
   showLoading();
