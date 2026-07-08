@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#060b18">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ストーム牛丼">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <title>ストーム牛丼</title>
 <!--
   ストーム牛丼グラス - 待受風Webアプリ
@@ -244,7 +250,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.6";
+const APP_VERSION = "v0.7";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -1336,6 +1342,14 @@ async function init() {
       fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
     }
   }, CONFIG.UPDATE_INTERVAL_MIN * 60 * 1000);
+
+  // Service Worker登録（PWA・オフライン対応）。非対応・file://等では静かにスキップ。
+  // sw.jsのCACHE_VERSIONはindex.html更新のたびに必ず上げること（仕様書10章）
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js").catch((err) => {
+      console.warn("Service Worker登録に失敗（オフライン対応のみ無効）:", err.message);
+    });
+  }
 }
 
 init();
