@@ -46,14 +46,15 @@
     align-items: flex-start;
     z-index: 10;
   }
+  /* 時刻を超大きく表示（UI改善指示書②） */
   #clock {
-    font-size: 64px;
+    font-size: 82px;
     font-weight: 200;
-    letter-spacing: 2px;
-    line-height: 1.1;
+    letter-spacing: 1px;
+    line-height: 1.05;
     font-variant-numeric: tabular-nums;
   }
-  #clock .sec { font-size: 30px; opacity: 0.7; }
+  #clock .sec { font-size: 28px; opacity: 0.65; margin-left: 6px; }
   #date-line { font-size: 15px; opacity: 0.85; margin-top: 2px; }
   #app-name { font-size: 13px; opacity: 0.55; margin-top: 4px; }
   #weather-badge { text-align: right; font-size: 13px; opacity: 0.9; }
@@ -94,16 +95,22 @@
   }
   #place-line { display: flex; justify-content: space-between; align-items: baseline; }
   #place-name { font-size: 15px; font-weight: 600; }
-  #temp-main { font-size: 26px; font-weight: 300; font-variant-numeric: tabular-nums; }
+  /* 重要な気温を大きく（UI改善指示書③） */
+  #temp-main { font-size: 38px; font-weight: 250; font-variant-numeric: tabular-nums; }
+  #humidity-wind { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+  #humidity-wind svg { flex: none; opacity: 0.8; }
+  #humidity-wind .sep { opacity: 0.35; margin: 0 6px; }
   #storm-line {
-    margin-top: 6px;
-    padding-top: 6px;
+    margin-top: 8px;
+    padding-top: 8px;
     border-top: 1px solid rgba(200, 170, 100, 0.25);
     color: #d9b96a;
     font-size: 12.5px;
     display: flex;
     justify-content: space-between;
   }
+  /* パターンの意味補足（UI改善指示書⑦） */
+  #pattern-desc { margin-top: 5px; font-size: 11px; opacity: 0.75; }
 
   /* ============ グルメニュース（拡張機能・1件ずつローテーション表示） ============ */
   #news-ticker {
@@ -134,14 +141,15 @@
     padding: 0 16px calc(14px + env(safe-area-inset-bottom));
     z-index: 10;
   }
+  /* 文言短縮に合わせタップ領域拡大・視認性UP（UI改善指示書⑤） */
   #buttons button {
     appearance: none;
     border: 1px solid rgba(200, 170, 100, 0.25);
     background: rgba(16, 24, 44, 0.8);
     color: #e8ecf4;
     border-radius: 12px;
-    padding: 10px 2px;
-    font-size: 11px;
+    padding: 13px 2px;
+    font-size: 12.5px;
     font-family: inherit;
     cursor: pointer;
   }
@@ -233,25 +241,32 @@
     </div>
     <div>
       <span id="temp-main">--℃</span>
-      <span id="feels-like" style="opacity:.7; font-size:12px;"> Feels like --℃</span>
+      <span id="feels-like" style="opacity:.75; font-size:13px;"> 体感 --℃</span>
     </div>
-    <div id="humidity-wind" style="opacity:.8;">湿度 --% / 風速 --m/s</div>
+    <div id="humidity-wind" style="opacity:.85;">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3c3.5 4.5 6 7.7 6 11a6 6 0 0 1-12 0c0-3.3 2.5-6.5 6-11z"/></svg>
+      <span>湿度 <span id="humidity-val">--%</span></span>
+      <span class="sep">｜</span>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 8h8a2.5 2.5 0 1 0-2.5-2.5M4 12h12a2.5 2.5 0 1 1-2.5 2.5M4 16h6"/></svg>
+      <span>風速 <span id="wind-val">--m/s</span></span>
+    </div>
     <div id="storm-line">
       <span id="storm-name">Storm: --</span>
       <span id="pattern-name">Pattern: --</span>
     </div>
+    <div id="pattern-desc"></div>
   </section>
 
   <!-- グルメニュース（拡張機能。1件ずつローテーション表示・取得失敗時は非表示のまま） -->
   <div id="news-ticker" class="hidden"><a id="news-item" target="_blank" rel="noopener"></a></div>
 
-  <!-- 操作ボタン5つ（UI指示書E） -->
+  <!-- 操作ボタン5つ（文言はUI改善指示書⑤で短縮） -->
   <nav id="buttons">
-    <button id="btn-minimal"><img class="btn-icon" src="assets/btn-minimal.png" alt="">待受モード</button>
-    <button id="btn-refresh"><img class="btn-icon" src="assets/btn-refresh.png" alt="">天気更新</button>
-    <button id="btn-pattern"><img class="btn-icon" src="assets/btn-pattern.png" alt="">パターン変更</button>
+    <button id="btn-minimal"><img class="btn-icon" src="assets/btn-minimal.png" alt="">待受</button>
+    <button id="btn-refresh"><img class="btn-icon" src="assets/btn-refresh.png" alt="">更新</button>
+    <button id="btn-pattern"><img class="btn-icon" src="assets/btn-pattern.png" alt="">パターン</button>
     <button id="btn-undo"><img class="btn-icon" src="assets/btn-undo.png" alt="">戻す</button>
-    <button id="btn-egg"><img class="btn-icon" src="assets/btn-egg.png" alt="">卵チェンジ</button>
+    <button id="btn-egg"><img class="btn-icon" src="assets/btn-egg.png" alt="">卵</button>
   </nav>
 
   <!-- 状態表示（UI指示書F。ローディング/エラーの制御はSTEP 2で実装） -->
@@ -275,7 +290,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.11";
+const APP_VERSION = "v0.12";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -364,6 +379,16 @@ const CONFIG = {
     "沈殿型": "牛丼灼熱",
     "結晶型": "牛丼大時化",
     "枝状型": "牛丼疾風",
+  },
+
+  // パターンの意味補足（UI改善指示書⑦。天気カード内に1行表示）
+  PATTERN_DESCRIPTIONS: {
+    "澄み型": "晴れの日。具材は丼に収まり、上部が澄み渡る",
+    "白濁型": "寒い日・雪。ミルク色の霧に米粒が舞い降りる",
+    "浮遊型": "雨や霧。具材がふわふわと浮遊する",
+    "沈殿型": "暑い日。具材がどっしり沈み、湯気が立つ",
+    "結晶型": "雷雨・嵐。結晶の枝が出て大荒れになる",
+    "枝状型": "強い風。具材が筋状に横へたなびく",
   },
 
   // 暑い日・寒い日の判定しきい値（℃）
@@ -735,10 +760,11 @@ function initScene() {
   scene.fog = fogEffect;
 
   // 丼（y≈0〜1）が画面下部に収まるよう、注視点を丼より上に置く（UI指示書必須要件）
+  // UI改善指示書①: カメラを寄せて丼と具材を大きく＝主役ビジュアル拡大
   camera = new THREE.PerspectiveCamera(
     46, container.clientWidth / container.clientHeight, 0.1, 100);
-  camera.position.set(0, 1.8, 4.6);
-  camera.lookAt(0, 1.95, 0);
+  camera.position.set(0, 1.5, 4.2);
+  camera.lookAt(0, 1.35, 0);
 
   // ライト: 温かみのある光で食欲と安心感を演出（設計書5-5）
   scene.add(new THREE.AmbientLight(0x40465e, 1.1));
@@ -995,7 +1021,7 @@ function buildSteam(lowSpec) {
     arr[i * 3 + 1] = 1.0 + Math.random() * 1.4;
     arr[i * 3 + 2] = (Math.random() - 0.5) * 0.5;
   }
-  bgEffects.steam = makePoints(arr, 0xf0f0f0, 0.4, 0);
+  bgEffects.steam = makePoints(arr, 0xf0f0f0, 0.3, 0);
   bgEffects.steam.material.map = makeSoftCircleTexture();
   bgEffects.steam.material.needsUpdate = true;
 }
@@ -1046,7 +1072,8 @@ function updateEffects() {
   fogOverlayEl.style.opacity = (bowlParams.turbidity * 0.5).toFixed(3);
   const steam = bgEffects.steam;
   if (steam) {
-    steam.visible = bowlParams.steam > 0.02;
+    // 薄すぎる湯気は「にじみ」に見えるため、少量時は出さない
+    steam.visible = bowlParams.steam > 0.15;
     steam.material.opacity = bowlParams.steam * 0.4;
   }
 }
@@ -1236,8 +1263,9 @@ function updateOverlay() {
   document.getElementById("place-name").textContent = w.place;
   document.getElementById("weather-detail").textContent = `${disp.label} / 降水 ${precipText}`;
   document.getElementById("temp-main").textContent = `${Math.round(w.temperature)}℃`;
-  document.getElementById("feels-like").textContent = ` Feels like ${Math.round(w.apparentTemp)}℃`;
-  document.getElementById("humidity-wind").textContent = `湿度 ${w.humidity}% / 風速 ${Number(w.windSpeed).toFixed(1)}m/s`;
+  document.getElementById("feels-like").textContent = ` 体感 ${Math.round(w.apparentTemp)}℃`;
+  document.getElementById("humidity-val").textContent = `${w.humidity}%`;
+  document.getElementById("wind-val").textContent = `${Number(w.windSpeed).toFixed(1)}m/s`;
   const iconEl = document.getElementById("weather-icon");
   const iconSrc = (w.windSpeed >= CONFIG.WIND_BRANCH_SPEED) ? WX_WIND_ICON : disp.icon;
   if (iconEl.getAttribute("src") !== iconSrc) iconEl.src = iconSrc;
@@ -1301,11 +1329,14 @@ function startNewsRotation() {
   }, CONFIG.NEWS.ROTATE_SEC * 1000);
 }
 
-/** 画面下部のStorm名・Pattern名表示（例: Storm: 牛丼乱気流 / Pattern: 浮遊型） */
+/** 画面下部のStorm名・Pattern名・意味補足の表示（UI改善指示書⑦） */
 function updateStormLabel() {
   document.getElementById("storm-name").textContent =
     `Storm: ${CONFIG.STORM_NAMES[appState.pattern] || "--"}`;
   document.getElementById("pattern-name").textContent = `Pattern: ${appState.pattern}`;
+  const desc = CONFIG.PATTERN_DESCRIPTIONS[appState.pattern];
+  document.getElementById("pattern-desc").textContent =
+    desc ? `ⓘ ${appState.pattern}＝${desc}` : "";
 }
 
 /** ローディング表示（UI指示書F） */
@@ -1394,7 +1425,7 @@ function updateClock() {
   const hh = String(now.getHours()).padStart(2, "0");
   const mm = String(now.getMinutes()).padStart(2, "0");
   const ss = String(now.getSeconds()).padStart(2, "0");
-  document.getElementById("clock").innerHTML = `${hh}:${mm}<span class="sec">:${ss}</span>`;
+  document.getElementById("clock").innerHTML = `${hh}:${mm}<span class="sec">${ss}</span>`;
   document.getElementById("date-line").textContent = now.toLocaleDateString("ja-JP", {
     month: "long", day: "numeric", weekday: "long",
   });
