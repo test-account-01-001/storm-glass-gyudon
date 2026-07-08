@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#060b18">
+<title>ストーム牛丼</title>
+<!--
+  ストーム牛丼グラス - 待受風Webアプリ
+  仕様: docs/ストーム牛丼グラス_設計書.md (v1.1) / docs/ストーム牛丼グラス_AI引き継ぎ仕様書.md (v1.1)
+  Three.js: CDN読込（STEP 3で導入。導入時にバージョンをこのコメントに記載する）
+  内部構成: ①CONFIG ②状態 ③API取得 ④変換ロジック ⑤Three.jsシーン ⑥UI ⑦起動処理
+-->
+<style>
+  /* ============ リセット・基本 ============ */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+    /* 深い紺の夜空基調（設計書5-5: 有機EL・電池に優しい） */
+    background: linear-gradient(180deg, #060b18 0%, #0a1226 55%, #101a30 100%);
+    color: #e8ecf4;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #app {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  .hidden { display: none !important; }
+
+  /* ============ 上部エリア: 時計・日付・天気 ============ */
+  #top-area {
+    padding: max(20px, env(safe-area-inset-top)) 24px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    z-index: 10;
+  }
+  #clock {
+    font-size: 64px;
+    font-weight: 200;
+    letter-spacing: 2px;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+  #date-line { font-size: 15px; opacity: 0.85; margin-top: 2px; }
+  #app-name { font-size: 13px; opacity: 0.55; margin-top: 4px; }
+  #weather-badge { text-align: right; font-size: 13px; opacity: 0.9; }
+  #weather-icon { font-size: 22px; display: block; }
+  #updated-at { font-size: 11px; opacity: 0.6; display: block; margin-top: 2px; }
+
+  /* ============ 中央エリア: 3Dシーン（STEP 3でThree.js canvasを配置） ============ */
+  #scene-container {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+  }
+  #scene-container canvas { display: block; width: 100%; height: 100%; }
+
+  /* ============ 情報パネル ============ */
+  #info-panel {
+    margin: 0 16px 10px;
+    padding: 12px 16px;
+    background: rgba(10, 16, 32, 0.72);
+    border: 1px solid rgba(200, 170, 100, 0.18);
+    border-radius: 14px;
+    font-size: 13px;
+    line-height: 1.6;
+    backdrop-filter: blur(6px);
+    z-index: 10;
+  }
+  #place-line { display: flex; justify-content: space-between; align-items: baseline; }
+  #place-name { font-size: 15px; font-weight: 600; }
+  #temp-main { font-size: 26px; font-weight: 300; font-variant-numeric: tabular-nums; }
+  #storm-line {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(200, 170, 100, 0.25);
+    color: #d9b96a;
+    font-size: 12.5px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* ============ 操作ボタンエリア（動作はSTEP 5で実装） ============ */
+  #buttons {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    padding: 0 16px calc(14px + env(safe-area-inset-bottom));
+    z-index: 10;
+  }
+  #buttons button {
+    appearance: none;
+    border: 1px solid rgba(200, 170, 100, 0.25);
+    background: rgba(16, 24, 44, 0.8);
+    color: #e8ecf4;
+    border-radius: 12px;
+    padding: 10px 2px;
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  #buttons button:disabled { opacity: 0.45; cursor: default; }
+  #buttons button .btn-icon { display: block; font-size: 16px; margin-bottom: 3px; }
+
+  /* ============ 状態表示: ローディング／エラー／鑑賞モード ============ */
+  #loading {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 14px;
+    background: rgba(6, 11, 24, 0.85);
+    z-index: 50;
+    font-size: 14px;
+  }
+  .spinner {
+    width: 34px; height: 34px;
+    border: 3px solid rgba(217, 185, 106, 0.25);
+    border-top-color: #d9b96a;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #error-banner {
+    position: absolute;
+    top: 120px; left: 50%; transform: translateX(-50%);
+    padding: 10px 18px;
+    background: rgba(60, 24, 24, 0.9);
+    border: 1px solid rgba(255, 120, 120, 0.4);
+    border-radius: 10px;
+    font-size: 13px;
+    z-index: 60;
+    white-space: nowrap;
+  }
+  #mode-badge {
+    position: absolute;
+    top: 108px; right: 16px;
+    padding: 4px 10px;
+    font-size: 11px;
+    color: #d9b96a;
+    border: 1px solid rgba(217, 185, 106, 0.5);
+    border-radius: 999px;
+    z-index: 20;
+  }
+
+  /* ============ バージョン表示（右下・常時） ============ */
+  #version {
+    position: absolute;
+    right: 8px;
+    bottom: calc(4px + env(safe-area-inset-bottom));
+    font-size: 10px;
+    opacity: 0.4;
+    z-index: 100;
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- 上部エリア: 時刻/日付/天気アイコン/更新時刻（UI指示書: 画面エリア説明） -->
+  <header id="top-area">
+    <div>
+      <div id="clock">--:--</div>
+      <div id="date-line">----</div>
+      <div id="app-name">ストーム牛丼</div>
+    </div>
+    <div id="weather-badge">
+      <span id="weather-icon"></span>
+      <span id="weather-label">--</span>
+      <span id="updated-at"></span>
+    </div>
+  </header>
+
+  <!-- 中央〜下部: 具材が浮遊する空間＋丼（STEP 3でThree.js描画） -->
+  <div id="scene-container"></div>
+
+  <!-- 情報パネル: 地点/気温/体感/天気/降水確率/湿度/風速/Storm名（STEP 2で実データ表示） -->
+  <section id="info-panel">
+    <div id="place-line">
+      <span id="place-name">--</span>
+      <span id="weather-detail">-- / 降水 --%</span>
+    </div>
+    <div>
+      <span id="temp-main">--℃</span>
+      <span id="feels-like" style="opacity:.7; font-size:12px;"> Feels like --℃</span>
+    </div>
+    <div id="humidity-wind" style="opacity:.8;">湿度 --% / 風速 --m/s</div>
+    <div id="storm-line">
+      <span id="storm-name">Storm: --</span>
+      <span id="pattern-name">Pattern: --</span>
+    </div>
+  </section>
+
+  <!-- 操作ボタン5つ（UI指示書E。動作はSTEP 5で実装するため現状は無効） -->
+  <nav id="buttons">
+    <button id="btn-minimal"  disabled title="STEP 5で実装"><span class="btn-icon">📱</span>待受モード</button>
+    <button id="btn-refresh"  disabled title="STEP 5で実装"><span class="btn-icon">☁️</span>天気更新</button>
+    <button id="btn-pattern"  disabled title="STEP 5で実装"><span class="btn-icon">🍚</span>パターン変更</button>
+    <button id="btn-undo"     disabled title="STEP 5で実装"><span class="btn-icon">↩️</span>戻す</button>
+    <button id="btn-egg"      disabled title="STEP 5で実装"><span class="btn-icon">🥚</span>卵チェンジ</button>
+  </nav>
+
+  <!-- 状態表示（UI指示書F。ローディング/エラーの制御はSTEP 2で実装） -->
+  <div id="loading" class="hidden">
+    <div class="spinner"></div>
+    <div>天気を取得中… 少々お待ちください</div>
+  </div>
+  <div id="error-banner" class="hidden">通信に失敗しました もう一度お試しください</div>
+  <div id="mode-badge" class="hidden">鑑賞モード</div>
+
+  <!-- バージョン（指示書: 画面右下に常時表示・微細修正でも+1） -->
+  <div id="version"></div>
+
+</div>
+
+<script>
+"use strict";
+
+/* =====================================================================
+ * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
+ * ===================================================================== */
+
+const APP_VERSION = "v0.1";
+
+// 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
+// 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
+const RICE_MAX_COUNT = 400;
+const MEAT_MAX_COUNT = 40;
+
+const CONFIG = {
+  // 位置情報拒否時のデフォルト地点（東京）
+  DEFAULT_LOCATION: { lat: 35.68, lon: 139.77, name: "東京(デフォルト)" },
+
+  // 天気の自動更新間隔（分）
+  UPDATE_INTERVAL_MIN: 30,
+
+  // 粒の最大数
+  RICE_MAX_COUNT: RICE_MAX_COUNT,
+  MEAT_MAX_COUNT: MEAT_MAX_COUNT,
+
+  // 具材の種類・色・サイズ・最大数（設計書4-5 / UI指示書B）
+  // 1項目追加すると自動でInstancedMeshが生成される設計（STEP 3で実装）
+  INGREDIENTS: [
+    { name: "rice",    label: "米粒",     color: 0xf7f3e9, size: 0.045, maxCount: RICE_MAX_COUNT },
+    { name: "meat",    label: "牛肉片",   color: 0x8a5a33, size: 0.13,  maxCount: MEAT_MAX_COUNT },
+    { name: "onion",   label: "玉ねぎ",   color: 0xe8cf9a, size: 0.11,  maxCount: 60 },
+    { name: "drop",    label: "つゆ滴",   color: 0xc9862e, size: 0.05,  maxCount: 80 },
+    { name: "ginger",  label: "紅しょうが", color: 0xd94f4f, size: 0.06, maxCount: 30 },
+    { name: "sparkle", label: "光の粒",   color: 0xffe9b0, size: 0.03,  maxCount: 100 },
+  ],
+
+  // 気温→米量（設計書4-3）。[気温℃, riceAmount] の配列。間は線形補間、範囲外は端の値。
+  // 30℃以上=0.15 / 20〜30=0.4 / 10〜20=0.65 / 0〜10=0.85 / 0℃未満=1.0 を
+  // 帯の代表点で表し、境界がなめらかに変わるようにしている
+  TEMP_TABLE: [
+    [0, 1.0],
+    [5, 0.85],
+    [15, 0.65],
+    [25, 0.4],
+    [30, 0.15],
+  ],
+
+  // 天気→パターンの対応・各パターンの強さ（設計書4-2/4-4）
+  // wmo: 該当するWMO天気コード（歯抜けあり・Open-Meteo公式コード表準拠）
+  // params: scatter=散らばり / turbidity=白濁 / drift=横流れ / steam=湯気（各0〜1）
+  PATTERN_TABLE: {
+    "結晶型": { wmo: [95, 96, 99],                                  params: { scatter: 1.0,  turbidity: 0.4,  drift: 0.5,  steam: 0.1 } },
+    "白濁型": { wmo: [71, 73, 75, 77, 85, 86], coldDay: true,       params: { scatter: 0.35, turbidity: 0.9,  drift: 0.1,  steam: 0.15 } },
+    "枝状型": { windOver: true,                                      params: { scatter: 0.5,  turbidity: 0.15, drift: 1.0,  steam: 0.1 } },
+    "浮遊型": { wmo: [45, 48, 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82], params: { scatter: 0.6, turbidity: 0.25, drift: 0.2, steam: 0.2 } },
+    "沈殿型": { hotDay: true,                                        params: { scatter: 0.05, turbidity: 0.05, drift: 0.05, steam: 0.9 } },
+    "澄み型": { wmo: [0, 1],                                         params: { scatter: 0.05, turbidity: 0.0,  drift: 0.05, steam: 0.1 } },
+  },
+
+  // 天気カテゴリ→肉量（設計書4-4: 晴0.5/曇0.6/雨0.7/雪0.6/雷雨1.0。霧は曇り相当の0.6）
+  MEAT_BY_CATEGORY: {
+    clear: 0.5, cloudy: 0.6, fog: 0.6, rain: 0.7, snow: 0.6, thunder: 1.0,
+  },
+
+  // 複合時の優先順位（設計書4-2）
+  PATTERN_PRIORITY: ["結晶型", "白濁型", "枝状型", "浮遊型", "沈殿型", "澄み型"],
+
+  // 背景: 時間帯×天気（設計書5-3）。時間帯の基本グラデ＋天気による補正。
+  // 実際の描画はSTEP 3のupdateBackground()が消費する
+  BACKGROUNDS: {
+    timeBands: { morning: [5, 10], day: [10, 16], evening: [16, 19], night: [19, 5] },
+    sky: {
+      morning: { top: "#2a3a5e", bottom: "#c98a5a" },
+      day:     { top: "#3a5a8e", bottom: "#8fb4d9" },
+      evening: { top: "#2a2448", bottom: "#c96a3e" },
+      night:   { top: "#060b18", bottom: "#101a30" },
+    },
+    weather: {
+      clear:   { tint: null,      particles: null },
+      cloudy:  { tint: "#5a6272", particles: null },
+      rain:    { tint: "#3a4256", particles: "rain" },
+      wind:    { tint: "#4a5266", particles: null },
+      hot:     { tint: "#6a4a3a", particles: null },
+      cold:    { tint: "#4a5a72", particles: null },
+      snow:    { tint: "#6a7286", particles: "snow" },
+    },
+  },
+
+  // パターン別の表示名（画面下部のStorm表示）
+  STORM_NAMES: {
+    "澄み型": "牛丼日和",
+    "白濁型": "牛丼吹雪",
+    "浮遊型": "牛丼乱気流",
+    "沈殿型": "牛丼灼熱",
+    "結晶型": "牛丼大時化",
+    "枝状型": "牛丼疾風",
+  },
+
+  // 暑い日・寒い日の判定しきい値（℃）
+  HOT_DAY_TEMP: 30,
+  COLD_DAY_TEMP: 5,
+
+  // 枝状型になる風速（m/s）
+  WIND_BRANCH_SPEED: 8,
+
+  // 時計表示の初期状態
+  SHOW_CLOCK: true,
+
+  // trueで描画を簡易化（古い端末向け）
+  LOW_SPEC_MODE: false,
+};
+
+/* =====================================================================
+ * ② 状態 … weatherState / appState / bowlParams（STEP 2以降で使用）
+ * ===================================================================== */
+// STEP 2で実装: weatherState = { code, temperature, apparentTemp, windSpeed,
+//                humidity, precipProbability, fetchedAt, place }
+// STEP 4以降で実装: appState / bowlParams / targetParams
+
+/* =====================================================================
+ * ③ API取得 … fetchWeather() / fetchPlaceName() / getLocation()
+ * ===================================================================== */
+// STEP 2で実装（Open-Meteo・Geolocation・ローディング/エラーUI・自動更新）
+
+/* =====================================================================
+ * ④ 変換ロジック … decidePattern() / weatherToBowl()（心臓部）
+ * ===================================================================== */
+// STEP 4で実装
+
+/* =====================================================================
+ * ⑤ Three.jsシーン … initScene() / updateParticles() / updateBackground() / animate()
+ * ===================================================================== */
+// STEP 3で実装（丼LatheGeometry・卵・具材InstancedMesh・背景・アニメーションループ）
+
+/* =====================================================================
+ * ⑥ UI … 時計・情報パネル・操作ボタン・待受モード
+ * ===================================================================== */
+
+/** 時計・日付を更新する（1秒ごと） */
+function updateClock() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  document.getElementById("clock").textContent = `${hh}:${mm}`;
+  document.getElementById("date-line").textContent = now.toLocaleDateString("ja-JP", {
+    month: "long", day: "numeric", weekday: "long",
+  });
+}
+
+/* =====================================================================
+ * ⑦ 起動処理 … init()
+ * ===================================================================== */
+
+function init() {
+  // バージョン表示（画面右下に常時）
+  document.getElementById("version").textContent = APP_VERSION;
+
+  // 時計（CONFIG.SHOW_CLOCK=falseなら非表示）
+  if (CONFIG.SHOW_CLOCK) {
+    updateClock();
+    setInterval(updateClock, 1000);
+  } else {
+    document.getElementById("clock").classList.add("hidden");
+  }
+
+  // STEP 2以降: ローディング表示→位置取得→天気取得→シーン構築→ループ開始→タイマー設定
+}
+
+init();
+</script>
+</body>
+</html>
