@@ -1,0 +1,1464 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#060b18">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ストーム牛丼">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>ストーム牛丼</title>
+<!--
+  ストーム牛丼グラス - 待受風Webアプリ
+  仕様: docs/ストーム牛丼グラス_設計書.md (v1.1) / docs/ストーム牛丼グラス_AI引き継ぎ仕様書.md (v1.1)
+  Three.js: r128（cdnjs・クラシック版グローバルTHREE。ESMやビルドツールは使わない方針）
+  内部構成: ①CONFIG ②状態 ③API取得 ④変換ロジック ⑤Three.jsシーン ⑥UI ⑦起動処理
+-->
+<style>
+  /* ============ リセット・基本 ============ */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+    /* 深い紺の夜空基調（設計書5-5: 有機EL・電池に優しい） */
+    background: linear-gradient(180deg, #060b18 0%, #0a1226 55%, #101a30 100%);
+    color: #e8ecf4;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #app {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  .hidden { display: none !important; }
+
+  /* ============ 上部エリア: 時計・日付・天気 ============ */
+  #top-area {
+    padding: max(20px, env(safe-area-inset-top)) 24px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    z-index: 10;
+  }
+  #clock {
+    font-size: 64px;
+    font-weight: 200;
+    letter-spacing: 2px;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+  #clock .sec { font-size: 30px; opacity: 0.7; }
+  #date-line { font-size: 15px; opacity: 0.85; margin-top: 2px; }
+  #app-name { font-size: 13px; opacity: 0.55; margin-top: 4px; }
+  #weather-badge { text-align: right; font-size: 13px; opacity: 0.9; }
+  #weather-icon { width: 30px; height: 30px; display: block; margin: 0 0 2px auto; }
+  #updated-at { font-size: 11px; opacity: 0.6; display: block; margin-top: 2px; }
+
+  /* ============ 中央エリア: 3Dシーン ============ */
+  #scene-container {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+    transition: background 2s ease; /* 時間帯×天気の背景をなめらかに切替 */
+  }
+  #scene-container canvas { position: absolute; inset: 0; z-index: 2; }
+  #skyline { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1; opacity: 0.6; }
+  #scene-fallback {
+    position: absolute; inset: 0; z-index: 4;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; opacity: 0.8; text-align: center;
+  }
+  /* 白濁型のミルク色の霧（turbidityで濃度制御） */
+  #fog-overlay {
+    position: absolute; inset: 0; z-index: 3;
+    background: #dde4ee; opacity: 0; pointer-events: none;
+  }
+
+  /* ============ 情報パネル ============ */
+  #info-panel {
+    margin: 0 16px 10px;
+    padding: 12px 16px;
+    background: rgba(10, 16, 32, 0.72);
+    border: 1px solid rgba(200, 170, 100, 0.18);
+    border-radius: 14px;
+    font-size: 13px;
+    line-height: 1.6;
+    backdrop-filter: blur(6px);
+    z-index: 10;
+  }
+  #place-line { display: flex; justify-content: space-between; align-items: baseline; }
+  #place-name { font-size: 15px; font-weight: 600; }
+  #temp-main { font-size: 26px; font-weight: 300; font-variant-numeric: tabular-nums; }
+  #storm-line {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(200, 170, 100, 0.25);
+    color: #d9b96a;
+    font-size: 12.5px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* ============ グルメニュースティッカー（拡張機能） ============ */
+  #news-ticker {
+    margin: 0 16px 8px;
+    padding: 6px 0;
+    overflow: hidden;
+    background: rgba(10, 16, 32, 0.6);
+    border: 1px solid rgba(200, 170, 100, 0.14);
+    border-radius: 10px;
+    font-size: 12px;
+    z-index: 10;
+  }
+  #news-track {
+    display: inline-block;
+    white-space: nowrap;
+    padding-left: 100%; /* 右端の外からゆっくり流入させる */
+    animation: ticker-flow 40s linear infinite;
+    color: #cfd6e4;
+  }
+  @keyframes ticker-flow {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-100%); }
+  }
+  #news-track a { color: inherit; text-decoration: none; }
+  #news-track a:hover, #news-track a:active { color: #d9b96a; text-decoration: underline; }
+  #app.minimal #news-ticker { display: none; }
+
+  /* ============ 操作ボタンエリア（動作はSTEP 5で実装） ============ */
+  #buttons {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    padding: 0 16px calc(14px + env(safe-area-inset-bottom));
+    z-index: 10;
+  }
+  #buttons button {
+    appearance: none;
+    border: 1px solid rgba(200, 170, 100, 0.25);
+    background: rgba(16, 24, 44, 0.8);
+    color: #e8ecf4;
+    border-radius: 12px;
+    padding: 10px 2px;
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  #buttons button:disabled { opacity: 0.45; cursor: default; }
+  #buttons button .btn-icon { display: block; width: 24px; height: 24px; margin: 0 auto 4px; border-radius: 6px; }
+
+  /* 待受モード: 時計＋牛丼のみの最小UI表示（タップで復帰） */
+  #app.minimal #info-panel,
+  #app.minimal #buttons,
+  #app.minimal #weather-badge { display: none; }
+
+  /* ============ 状態表示: ローディング／エラー／鑑賞モード ============ */
+  #loading {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 14px;
+    background: rgba(6, 11, 24, 0.85);
+    z-index: 50;
+    font-size: 14px;
+  }
+  .spinner {
+    width: 34px; height: 34px;
+    border: 3px solid rgba(217, 185, 106, 0.25);
+    border-top-color: #d9b96a;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #error-banner {
+    position: absolute;
+    top: 120px; left: 50%; transform: translateX(-50%);
+    padding: 10px 18px;
+    background: rgba(60, 24, 24, 0.9);
+    border: 1px solid rgba(255, 120, 120, 0.4);
+    border-radius: 10px;
+    font-size: 13px;
+    z-index: 60;
+    white-space: nowrap;
+  }
+  #mode-badge {
+    position: absolute;
+    top: 108px; right: 16px;
+    padding: 4px 10px;
+    font-size: 11px;
+    color: #d9b96a;
+    border: 1px solid rgba(217, 185, 106, 0.5);
+    border-radius: 999px;
+    z-index: 20;
+  }
+
+  /* ============ バージョン表示（右下・常時） ============ */
+  #version {
+    position: absolute;
+    right: 8px;
+    bottom: calc(4px + env(safe-area-inset-bottom));
+    font-size: 10px;
+    opacity: 0.4;
+    z-index: 100;
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- 上部エリア: 時刻/日付/天気アイコン/更新時刻（UI指示書: 画面エリア説明） -->
+  <header id="top-area">
+    <div>
+      <div id="clock">--:--</div>
+      <div id="date-line">----</div>
+      <div id="app-name">ストーム牛丼</div>
+    </div>
+    <div id="weather-badge">
+      <img id="weather-icon" src="" alt="" hidden>
+      <span id="weather-label">--</span>
+      <span id="updated-at"></span>
+    </div>
+  </header>
+
+  <!-- 中央〜下部: 具材が浮遊する空間＋丼 -->
+  <div id="scene-container"><div id="fog-overlay"></div></div>
+
+  <!-- 情報パネル: 地点/気温/体感/天気/降水確率/湿度/風速/Storm名（STEP 2で実データ表示） -->
+  <section id="info-panel">
+    <div id="place-line">
+      <span id="place-name">--</span>
+      <span id="weather-detail">-- / 降水 --%</span>
+    </div>
+    <div>
+      <span id="temp-main">--℃</span>
+      <span id="feels-like" style="opacity:.7; font-size:12px;"> Feels like --℃</span>
+    </div>
+    <div id="humidity-wind" style="opacity:.8;">湿度 --% / 風速 --m/s</div>
+    <div id="storm-line">
+      <span id="storm-name">Storm: --</span>
+      <span id="pattern-name">Pattern: --</span>
+    </div>
+  </section>
+
+  <!-- グルメニュースティッカー（拡張機能。取得失敗時は非表示のまま） -->
+  <div id="news-ticker" class="hidden"><span id="news-track"></span></div>
+
+  <!-- 操作ボタン5つ（UI指示書E） -->
+  <nav id="buttons">
+    <button id="btn-minimal"><img class="btn-icon" src="assets/btn-minimal.png" alt="">待受モード</button>
+    <button id="btn-refresh"><img class="btn-icon" src="assets/btn-refresh.png" alt="">天気更新</button>
+    <button id="btn-pattern"><img class="btn-icon" src="assets/btn-pattern.png" alt="">パターン変更</button>
+    <button id="btn-undo"><img class="btn-icon" src="assets/btn-undo.png" alt="">戻す</button>
+    <button id="btn-egg"><img class="btn-icon" src="assets/btn-egg.png" alt="">卵チェンジ</button>
+  </nav>
+
+  <!-- 状態表示（UI指示書F。ローディング/エラーの制御はSTEP 2で実装） -->
+  <div id="loading" class="hidden">
+    <div class="spinner"></div>
+    <div>天気を取得中… 少々お待ちください</div>
+  </div>
+  <div id="error-banner" class="hidden">通信に失敗しました もう一度お試しください</div>
+  <div id="mode-badge" class="hidden">鑑賞モード</div>
+
+  <!-- バージョン（指示書: 画面右下に常時表示・微細修正でも+1） -->
+  <div id="version"></div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+"use strict";
+
+/* =====================================================================
+ * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
+ * ===================================================================== */
+
+const APP_VERSION = "v0.10";
+
+// 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
+// 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
+const RICE_MAX_COUNT = 400;
+const MEAT_MAX_COUNT = 40;
+
+const CONFIG = {
+  // 位置情報拒否時のデフォルト地点（東京）
+  DEFAULT_LOCATION: { lat: 35.68, lon: 139.77, name: "東京(デフォルト)" },
+
+  // 天気の自動更新間隔（分）
+  UPDATE_INTERVAL_MIN: 30,
+
+  // 粒の最大数
+  RICE_MAX_COUNT: RICE_MAX_COUNT,
+  MEAT_MAX_COUNT: MEAT_MAX_COUNT,
+
+  // 具材の種類・色・サイズ・最大数（設計書4-5 / UI指示書B）
+  // 1項目追加すると自動でInstancedMeshが生成される設計（STEP 3で実装）
+  INGREDIENTS: [
+    { name: "rice",    label: "米粒",     color: 0xf7f3e9, size: 0.045, maxCount: RICE_MAX_COUNT },
+    { name: "meat",    label: "牛肉片",   color: 0x8a5a33, size: 0.13,  maxCount: MEAT_MAX_COUNT },
+    { name: "onion",   label: "玉ねぎ",   color: 0xe8cf9a, size: 0.11,  maxCount: 60 },
+    { name: "drop",    label: "つゆ滴",   color: 0xc9862e, size: 0.05,  maxCount: 80 },
+    { name: "ginger",  label: "紅しょうが", color: 0xd94f4f, size: 0.06, maxCount: 30 },
+    { name: "sparkle", label: "光の粒",   color: 0xffe9b0, size: 0.03,  maxCount: 100 },
+  ],
+
+  // 気温→米量（設計書4-3）。[気温℃, riceAmount] の配列。間は線形補間、範囲外は端の値。
+  // 30℃以上=0.15 / 20〜30=0.4 / 10〜20=0.65 / 0〜10=0.85 / 0℃未満=1.0 を
+  // 帯の代表点で表し、境界がなめらかに変わるようにしている
+  TEMP_TABLE: [
+    [0, 1.0],
+    [5, 0.85],
+    [15, 0.65],
+    [25, 0.4],
+    [30, 0.15],
+  ],
+
+  // 天気→パターンの対応・各パターンの強さ（設計書4-2/4-4）
+  // wmo: 該当するWMO天気コード（歯抜けあり・Open-Meteo公式コード表準拠）
+  // params: scatter=散らばり / turbidity=白濁 / drift=横流れ / steam=湯気（各0〜1）
+  PATTERN_TABLE: {
+    "結晶型": { wmo: [95, 96, 99],                                  params: { scatter: 1.0,  turbidity: 0.4,  drift: 0.5,  steam: 0.1 } },
+    "白濁型": { wmo: [71, 73, 75, 77, 85, 86], coldDay: true,       params: { scatter: 0.35, turbidity: 0.9,  drift: 0.1,  steam: 0.15 } },
+    "枝状型": { windOver: true,                                      params: { scatter: 0.5,  turbidity: 0.15, drift: 1.0,  steam: 0.1 } },
+    "浮遊型": { wmo: [45, 48, 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82], params: { scatter: 0.6, turbidity: 0.25, drift: 0.2, steam: 0.2 } },
+    "沈殿型": { hotDay: true,                                        params: { scatter: 0.05, turbidity: 0.05, drift: 0.05, steam: 0.9 } },
+    "澄み型": { wmo: [0, 1],                                         params: { scatter: 0.05, turbidity: 0.0,  drift: 0.05, steam: 0.1 } },
+  },
+
+  // 天気カテゴリ→肉量（設計書4-4: 晴0.5/曇0.6/雨0.7/雪0.6/雷雨1.0。霧は曇り相当の0.6）
+  MEAT_BY_CATEGORY: {
+    clear: 0.5, cloudy: 0.6, fog: 0.6, rain: 0.7, snow: 0.6, thunder: 1.0,
+  },
+
+  // 複合時の優先順位（設計書4-2）
+  PATTERN_PRIORITY: ["結晶型", "白濁型", "枝状型", "浮遊型", "沈殿型", "澄み型"],
+
+  // 背景: 時間帯×天気（設計書5-3）。時間帯の基本グラデ＋天気による補正。
+  // 実際の描画はSTEP 3のupdateBackground()が消費する
+  BACKGROUNDS: {
+    timeBands: { morning: [5, 10], day: [10, 16], evening: [16, 19], night: [19, 5] },
+    sky: {
+      morning: { top: "#2a3a5e", bottom: "#c98a5a" },
+      day:     { top: "#3a5a8e", bottom: "#8fb4d9" },
+      evening: { top: "#2a2448", bottom: "#c96a3e" },
+      night:   { top: "#060b18", bottom: "#101a30" },
+    },
+    weather: {
+      clear:   { tint: null,      particles: null },
+      cloudy:  { tint: "#5a6272", particles: null },
+      rain:    { tint: "#3a4256", particles: "rain" },
+      wind:    { tint: "#4a5266", particles: null },
+      hot:     { tint: "#6a4a3a", particles: null },
+      cold:    { tint: "#4a5a72", particles: null },
+      snow:    { tint: "#6a7286", particles: "snow" },
+    },
+  },
+
+  // パターン別の表示名（画面下部のStorm表示）
+  STORM_NAMES: {
+    "澄み型": "牛丼日和",
+    "白濁型": "牛丼吹雪",
+    "浮遊型": "牛丼乱気流",
+    "沈殿型": "牛丼灼熱",
+    "結晶型": "牛丼大時化",
+    "枝状型": "牛丼疾風",
+  },
+
+  // 暑い日・寒い日の判定しきい値（℃）
+  HOT_DAY_TEMP: 30,
+  COLD_DAY_TEMP: 5,
+
+  // 枝状型になる風速（m/s）
+  WIND_BRANCH_SPEED: 8,
+
+  // 時計表示の初期状態
+  SHOW_CLOCK: true,
+
+  // trueで描画を簡易化（古い端末向け）
+  LOW_SPEC_MODE: false,
+
+  // グルメニュースティッカー（ユーザー指示による拡張機能。設計書v1.1には未記載）
+  // RSSはCORS非対応のため、キー不要のRSS→JSON変換サービス(rss2json)経由で取得する。
+  // 取得失敗・サービス停止時はティッカーを非表示にして本体は影響を受けない
+  NEWS: {
+    ENABLED: true,
+    FEED_URL: "https://gourmet.watch.impress.co.jp/data/rss/1.0/grw/feed.rdf", // グルメWatch
+    CONVERTER: "https://api.rss2json.com/v1/api.json?rss_url=",
+    UPDATE_INTERVAL_MIN: 30, // ニュースの自動更新間隔（分）
+    MAX_ITEMS: 8,            // ティッカーに流す最大件数
+  },
+};
+
+/* =====================================================================
+ * ② 状態 … weatherState / appState / bowlParams（設計書6章）
+ * ===================================================================== */
+
+/** 最新の天気状態。取得成功（またはデモ表示）までnull */
+let weatherState = null;
+
+/** 天気取得に使う座標。自動更新・再試行・手動更新で再利用する */
+let lastLocation = null; // { lat, lon, isDefault }
+
+/** 失敗時の再試行タイマーID（多重予約を防ぐ） */
+let retryTimerId = null;
+
+/** グルメニュースの見出しリスト（取得失敗時は空のまま＝ティッカー非表示） */
+let newsItems = [];
+
+/** アプリ状態（設計書6章）。eggMode/minimalUIのlocalStorage保存はSTEP 5で実装 */
+let appState = {
+  pattern: "澄み型",       // 現在の変化パターン（6種）
+  viewMode: "auto",        // "auto"=天気連動 / "manual"=鑑賞モード（STEP 5）
+  patternHistory: [],      // 「戻す」用の履歴・上限20件（STEP 5）
+  eggMode: "raw",          // 生卵 ⇔ 温玉（STEP 5）
+  minimalUI: false,        // 待受モード（STEP 5）
+};
+
+/**
+ * 牛丼パラメータ（各0〜1。設計書4-4）。
+ * bowlParamsは表示中の現在値で、animate()内のlerpでtargetParamsへ滑らかに接近する。
+ * 「ぬるっと」遷移の要のため、bowlParamsへの直接代入は禁止（引き継ぎ仕様書10章）。
+ */
+let bowlParams   = { riceAmount: 0, meatAmount: 0, scatter: 0, turbidity: 0, drift: 0, steam: 0 };
+let targetParams = { ...bowlParams };
+
+/** パターン切替時刻（秒）。updateParticles()が遷移中の追従を滑らかにするのに使う */
+let patternChangedAt = -10;
+
+/* =====================================================================
+ * ③ API取得 … getLocation() / fetchWeather() / fetchPlaceName()
+ * ===================================================================== */
+
+const WEATHER_API_BASE = "https://api.open-meteo.com/v1/forecast";
+const RETRY_DELAY_MIN = 5; // 取得失敗時の再試行間隔（分・設計書9章）
+
+/**
+ * Geolocationで現在地を取得する。
+ * 拒否・失敗・非対応（permission系）はCONFIG.DEFAULT_LOCATIONで続行（設計書9章）。
+ * このPromiseはrejectしない（必ずどこかの座標に解決する）。
+ */
+function getLocation() {
+  return new Promise((resolve) => {
+    const fallback = {
+      lat: CONFIG.DEFAULT_LOCATION.lat,
+      lon: CONFIG.DEFAULT_LOCATION.lon,
+      isDefault: true,
+    };
+    if (!("geolocation" in navigator)) {
+      console.warn("この環境はGeolocation非対応です。デフォルト地点で続行します。");
+      resolve(fallback);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, isDefault: false }),
+      (err) => {
+        console.warn("位置情報を取得できませんでした。デフォルト地点で続行します:", err.message);
+        resolve(fallback);
+      },
+      { timeout: 10000, maximumAge: 600000 }
+    );
+  });
+}
+
+/**
+ * Open-Meteoから現在の天気を取得してweatherStateを更新する。
+ * 失敗時（network系）: 前回値があれば継続、なければ「晴れ・20℃」のデモ表示。
+ * いずれもエラーUIを表示し、5分後に再試行する（設計書9章）。
+ *
+ * 実レスポンス検証メモ（2026-07-08 実施）:
+ * - precipitation_probability は current で取得可能なことを確認済み。
+ *   仕様変動に備え、currentで欠損した場合のみ hourly の直近値で代替する（引き継ぎ仕様書10章）
+ * - 風速の既定単位は km/h のため wind_speed_unit=ms を必ず指定する（枝状型判定は m/s 前提）
+ */
+async function fetchWeather(lat, lon, { isDefault = false } = {}) {
+  const url = `${WEATHER_API_BASE}?latitude=${lat}&longitude=${lon}` +
+    "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,precipitation_probability" +
+    "&hourly=precipitation_probability&forecast_days=1" +
+    "&wind_speed_unit=ms&timezone=auto";
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const cur = data.current;
+    weatherState = {
+      code: cur.weather_code,
+      temperature: cur.temperature_2m,
+      apparentTemp: cur.apparent_temperature,
+      windSpeed: cur.wind_speed_10m, // m/s（wind_speed_unit=ms指定）
+      humidity: cur.relative_humidity_2m,
+      precipProbability: resolvePrecipProbability(data),
+      fetchedAt: new Date(),
+      place: isDefault ? CONFIG.DEFAULT_LOCATION.name : await fetchPlaceName(lat, lon),
+    };
+    if (retryTimerId !== null) {
+      clearTimeout(retryTimerId);
+      retryTimerId = null;
+    }
+    hideError();
+    // 取得成功時は必ず実際の天気に復帰（鑑賞モード解除）。
+    // ここを消すと鑑賞モードから永遠に戻れなくなる（仕様書10章）
+    appState.viewMode = "auto";
+    document.getElementById("mode-badge").classList.add("hidden");
+    updateOverlay();
+    setPattern(decidePattern(weatherState));
+  } catch (err) {
+    console.error("天気の取得に失敗しました:", err);
+    if (!weatherState) {
+      // 初回起動でAPIも失敗 → 「晴れ・20℃」のデモ表示＋エラーメッセージ（設計書9章）
+      weatherState = {
+        code: 0, temperature: 20, apparentTemp: 20, windSpeed: 2,
+        humidity: 50, precipProbability: 0, fetchedAt: null,
+        place: isDefault ? CONFIG.DEFAULT_LOCATION.name : "現在地",
+      };
+      updateOverlay();
+    }
+    showError();
+    scheduleRetry();
+  }
+}
+
+/** currentのprecipitation_probabilityが欠損している場合、hourlyの直近値で代替する */
+function resolvePrecipProbability(data) {
+  const curVal = data.current ? data.current.precipitation_probability : null;
+  if (curVal !== null && curVal !== undefined) return curVal;
+  const hourly = data.hourly;
+  if (hourly && hourly.time && hourly.precipitation_probability) {
+    // currentの観測時刻以前で最も新しい時刻の値を採用する
+    const curTime = data.current && data.current.time ? data.current.time : null;
+    let idx = 0;
+    if (curTime) {
+      for (let i = 0; i < hourly.time.length; i++) {
+        if (hourly.time[i] <= curTime) idx = i;
+      }
+    }
+    const v = hourly.precipitation_probability[idx];
+    if (v !== null && v !== undefined) return v;
+  }
+  return null; // 取得不能。表示は「--%」になる
+}
+
+/**
+ * 緯度経度→地名の逆引き。
+ * 実レスポンス検証メモ（2026-07-08 実施）: Open-Meteo Geocoding APIは name パラメータ必須
+ * （座標からの逆引き非対応）を確認。引き継ぎ仕様書7章の指定どおり地名表示を省略し
+ * 「現在地」表記とする。逆引き可能なAPIへの差し替えは指示書上ユーザー確認が必要。
+ */
+async function fetchPlaceName(lat, lon) {
+  return "現在地";
+}
+
+/**
+ * グルメニュースの取得（拡張機能）。
+ * 失敗しても致命的でないため静かに劣化させる（ティッカー非表示・再試行は次回定期更新任せ）
+ */
+async function fetchGourmetNews() {
+  if (!CONFIG.NEWS.ENABLED) return;
+  try {
+    const res = await fetch(CONFIG.NEWS.CONVERTER + encodeURIComponent(CONFIG.NEWS.FEED_URL));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.status !== "ok" || !Array.isArray(data.items)) {
+      throw new Error("RSS変換サービスの応答が不正");
+    }
+    newsItems = data.items
+      .slice(0, CONFIG.NEWS.MAX_ITEMS)
+      .map((item) => ({
+        title: (item.title || "").trim(),
+        link: (item.link || "").trim(),
+      }))
+      .filter((item) => item.title);
+    renderNewsTicker();
+  } catch (err) {
+    console.warn("グルメニュースの取得に失敗（ティッカー非表示で継続）:", err.message);
+    if (newsItems.length === 0) renderNewsTicker(); // 初回失敗時は確実に非表示へ
+  }
+}
+
+/** 5分後の再試行を予約する（多重予約はしない） */
+function scheduleRetry() {
+  if (retryTimerId !== null) return;
+  retryTimerId = setTimeout(() => {
+    retryTimerId = null;
+    if (lastLocation) {
+      fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
+    }
+  }, RETRY_DELAY_MIN * 60 * 1000);
+}
+
+/* =====================================================================
+ * ④ 変換ロジック … decidePattern() / weatherToBowl()（心臓部）
+ * ===================================================================== */
+
+/** 「雨が強いほど数が増える」（設計書4-2 浮遊型）に使う強雨系WMOコード */
+const HEAVY_RAIN_CODES = [63, 65, 67, 81, 82];
+
+/** PATTERN_TABLEの1定義が現在の天気に該当するか */
+function matchesPattern(def, state) {
+  if (def.wmo && def.wmo.includes(state.code)) return true;
+  if (def.coldDay && state.temperature < CONFIG.COLD_DAY_TEMP) return true;
+  if (def.hotDay && state.temperature >= CONFIG.HOT_DAY_TEMP) return true;
+  if (def.windOver && state.windSpeed >= CONFIG.WIND_BRANCH_SPEED) return true;
+  return false;
+}
+
+/**
+ * 心臓部1: weatherState→6パターンのどれかを決定。
+ * CONFIG.PATTERN_PRIORITYの順（結晶>白濁>枝状>浮遊>沈殿>澄み）に判定し、
+ * どれにも該当しない場合（曇り等）は最後の澄み型を既定とする。
+ */
+function decidePattern(state) {
+  for (const name of CONFIG.PATTERN_PRIORITY) {
+    if (matchesPattern(CONFIG.PATTERN_TABLE[name], state)) return name;
+  }
+  return CONFIG.PATTERN_PRIORITY[CONFIG.PATTERN_PRIORITY.length - 1];
+}
+
+/** [x, y]配列テーブルの線形補間（範囲外は端の値）。TEMP_TABLE用 */
+function lerpTable(table, x) {
+  if (x <= table[0][0]) return table[0][1];
+  for (let i = 0; i < table.length - 1; i++) {
+    const [x0, y0] = table[i];
+    const [x1, y1] = table[i + 1];
+    if (x <= x1) return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+  }
+  return table[table.length - 1][1];
+}
+
+/**
+ * 心臓部2: パターン＋気温テーブル→牛丼パラメータ（設計書4-3/4-4）。
+ * 戻り値はtargetParamsに入れ、bowlParamsへはanimate()のlerpで到達させること。
+ */
+function weatherToBowl(state, pattern) {
+  const p = CONFIG.PATTERN_TABLE[pattern].params;
+  const cat = wmoToCategory(state.code);
+
+  let meatAmount = (CONFIG.MEAT_BY_CATEGORY[cat] !== undefined) ? CONFIG.MEAT_BY_CATEGORY[cat] : 0.6;
+  if (pattern === "浮遊型" && HEAVY_RAIN_CODES.includes(state.code)) {
+    meatAmount = Math.min(1, meatAmount * 1.3); // 雨が強いほど浮遊する具材が増える
+  }
+
+  // 湿度は白濁の補正に使う（設計書4-1）: 60%超で最大+0.25まで濁す
+  const turbidity = Math.min(1, p.turbidity + Math.max(0, state.humidity - 60) / 100 * 0.25);
+
+  // 風速は横流れの補正に使う: しきい値比で最大+0.3
+  const drift = Math.min(1, p.drift + Math.min(state.windSpeed / CONFIG.WIND_BRANCH_SPEED, 1) * 0.3);
+
+  return {
+    riceAmount: lerpTable(CONFIG.TEMP_TABLE, state.temperature),
+    meatAmount,
+    scatter: p.scatter,
+    turbidity,
+    drift,
+    steam: p.steam,
+  };
+}
+
+/**
+ * パターンを適用しtargetParamsを更新する（遷移はanimate()のlerp任せ）。
+ * manual=true（鑑賞モード）: 天気連動を一時停止し、履歴push＋「鑑賞モード」バッジ表示。
+ * 「天気更新」または30分ごとの自動更新で実際の天気に復帰する（設計書5-2）。
+ */
+function setPattern(name, { manual = false } = {}) {
+  if (manual) {
+    appState.patternHistory.push(appState.pattern);
+    if (appState.patternHistory.length > 20) appState.patternHistory.shift(); // 上限20件（仕様書10章）
+    appState.viewMode = "manual";
+    document.getElementById("mode-badge").classList.remove("hidden");
+  }
+  appState.pattern = name;
+  if (weatherState) targetParams = weatherToBowl(weatherState, name);
+  patternChangedAt = performance.now() / 1000;
+  updateStormLabel();
+}
+
+/** 「パターン変更」ボタン: 6パターンを順送り（鑑賞モード） */
+const PATTERN_CYCLE = ["澄み型", "白濁型", "浮遊型", "沈殿型", "結晶型", "枝状型"];
+function cyclePattern() {
+  const idx = PATTERN_CYCLE.indexOf(appState.pattern);
+  setPattern(PATTERN_CYCLE[(idx + 1) % PATTERN_CYCLE.length], { manual: true });
+}
+
+/** 「戻す」ボタン: patternHistoryからpop（履歴が空なら何もしない） */
+function undoPattern() {
+  if (appState.patternHistory.length === 0) return;
+  const prev = appState.patternHistory.pop();
+  // 履歴に再pushしないため、setPatternを経由せず直接適用する
+  appState.pattern = prev;
+  if (weatherState) targetParams = weatherToBowl(weatherState, prev);
+  patternChangedAt = performance.now() / 1000;
+  updateStormLabel();
+}
+
+/* =====================================================================
+ * ⑤ Three.jsシーン … initScene() / updateBackground() / animate()
+ *    （updateParticles()のパターン別運動はSTEP 4で実装）
+ * ===================================================================== */
+
+let scene, camera, renderer;
+let bowlGroup, eggMesh;
+/** 卵のマテリアル（生=光沢オレンジ／温玉=白濁。buildBowl()で生成） */
+const EGG_MATERIALS = {};
+/** 具材種別ごとのInstancedMesh辞書 {rice, meat, onion, drop, ginger, sparkle} */
+let ingredientMeshes = {};
+/** 背景の天候パーティクル・星 */
+let bgEffects = { rain: null, snow: null, stars: null };
+let fogEffect;
+let sceneReady = false;
+
+/**
+ * Three.jsシーン一式を生成する。
+ * 丼（LatheGeometry）は常に画面下部に配置（UI指示書の必須要件）。
+ * カメラ・レイアウト変更時もbowlGroupの画面内位置を維持すること（引き継ぎ仕様書10章）。
+ */
+function initScene() {
+  const container = document.getElementById("scene-container");
+  const lowSpec = CONFIG.LOW_SPEC_MODE;
+
+  renderer = new THREE.WebGLRenderer({ antialias: !lowSpec, alpha: true });
+  renderer.setPixelRatio(lowSpec ? 1 : Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  container.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+
+  // 白濁表現用フォグ（STEP 4でturbidityに応じて濃度を制御。初期は無効=密度0）
+  fogEffect = new THREE.FogExp2(0xdde4ee, 0.0);
+  scene.fog = fogEffect;
+
+  // 丼（y≈0〜1）が画面下部に収まるよう、注視点を丼より上に置く（UI指示書必須要件）
+  camera = new THREE.PerspectiveCamera(
+    46, container.clientWidth / container.clientHeight, 0.1, 100);
+  camera.position.set(0, 1.8, 4.6);
+  camera.lookAt(0, 1.95, 0);
+
+  // ライト: 温かみのある光で食欲と安心感を演出（設計書5-5）
+  scene.add(new THREE.AmbientLight(0x40465e, 1.1));
+  const warmLight = new THREE.PointLight(0xffc37a, 1.0, 14);
+  warmLight.position.set(0.5, 3.2, 1.8);
+  scene.add(warmLight);
+  const rimLight = new THREE.DirectionalLight(0x6a7ab8, 0.5);
+  rimLight.position.set(-2, 3, -3);
+  scene.add(rimLight);
+
+  buildBowl(lowSpec);
+  buildIngredients(lowSpec);
+  buildBackgroundEffects(lowSpec);
+  buildSteam(lowSpec);
+
+  window.addEventListener("resize", onResize);
+  sceneReady = true;
+}
+
+/** 丼＋盛り＋卵（bowlGroup）。画面下部固定 */
+function buildBowl(lowSpec) {
+  bowlGroup = new THREE.Group();
+  const seg = lowSpec ? 24 : 48;
+
+  // 丼本体（LatheGeometry。輪郭点を変えると器の形が変わる）
+  const profile = [
+    new THREE.Vector2(0.0, 0.02),
+    new THREE.Vector2(0.38, 0.03),
+    new THREE.Vector2(0.42, 0.10),
+    new THREE.Vector2(0.60, 0.18),
+    new THREE.Vector2(0.90, 0.44),
+    new THREE.Vector2(1.05, 0.62),
+  ];
+  const bowlMesh = new THREE.Mesh(
+    new THREE.LatheGeometry(profile, seg),
+    new THREE.MeshStandardMaterial({ color: 0x2e3140, roughness: 0.35, metalness: 0.1, side: THREE.DoubleSide })
+  );
+  bowlGroup.add(bowlMesh);
+
+  // 盛り（米のマウンド）: 中心y=0.5・半径(0.95, 0.475, 0.95)の半楕円体
+  const mound = new THREE.Mesh(
+    new THREE.SphereGeometry(0.95, lowSpec ? 16 : 28, lowSpec ? 10 : 18, 0, Math.PI * 2, 0, Math.PI / 2),
+    new THREE.MeshStandardMaterial({ color: 0xeee3cc, roughness: 1.0 })
+  );
+  mound.scale.set(1, 0.5, 1);
+  mound.position.y = 0.5;
+  bowlGroup.add(mound);
+
+  // 盛り曲面上の高さ（中心からの水平距離r → 表面y）。トッピングを埋没させないため
+  const moundY = (r) => 0.5 + 0.475 * Math.sqrt(Math.max(0, 1 - (r / 0.95) ** 2));
+
+  // 盛りの上の牛肉・玉ねぎ（静的トッピング）
+  const meatMat = new THREE.MeshStandardMaterial({ color: 0x7a4a28, roughness: 0.6, flatShading: true });
+  const onionMat = new THREE.MeshStandardMaterial({ color: 0xe8cf9a, roughness: 0.7, transparent: true, opacity: 0.92 });
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * Math.PI * 2 + 0.4;
+    const r = 0.38 + (i % 3) * 0.16;
+    const piece = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.05, 0.22), meatMat);
+    piece.position.set(Math.cos(a) * r, moundY(r) + 0.02, Math.sin(a) * r);
+    piece.rotation.set(0.3 * Math.sin(i * 7), a, 0.2 * Math.cos(i * 5));
+    bowlGroup.add(piece);
+  }
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2;
+    const strip = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.025, 6, 10, Math.PI * 1.2), onionMat);
+    strip.position.set(Math.cos(a) * 0.6, moundY(0.6) + 0.02, Math.sin(a) * 0.6);
+    strip.rotation.set(Math.PI / 2 + 0.4 * Math.sin(i * 3), 0, a);
+    bowlGroup.add(strip);
+  }
+
+  // 卵（丼の中央＝盛りの頂上。toggleEgg()がマテイリアルを差し替える）
+  const eggWhite = new THREE.Mesh(
+    new THREE.CircleGeometry(0.3, seg / 2),
+    new THREE.MeshStandardMaterial({ color: 0xf6f0e2, roughness: 0.4, transparent: true, opacity: 0.75 })
+  );
+  eggWhite.rotation.x = -Math.PI / 2;
+  eggWhite.position.y = moundY(0) + 0.012;
+  bowlGroup.add(eggWhite);
+  EGG_MATERIALS.raw = new THREE.MeshStandardMaterial({ color: 0xffa22e, roughness: 0.15, emissive: 0x662f00 });
+  EGG_MATERIALS.onsen = new THREE.MeshStandardMaterial({ color: 0xf3ede2, roughness: 0.55, emissive: 0x1a1208, transparent: true, opacity: 0.96 });
+  eggMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.17, seg / 2, 12),
+    EGG_MATERIALS[appState.eggMode] || EGG_MATERIALS.raw
+  );
+  eggMesh.scale.set(1, 0.6, 1);
+  eggMesh.position.y = moundY(0) + 0.03;
+  bowlGroup.add(eggMesh);
+
+  bowlGroup.position.set(0, 0, 0);
+  scene.add(bowlGroup);
+}
+
+/** CONFIG.INGREDIENTSから具材InstancedMeshを自動生成（1項目追加で自動対応） */
+function buildIngredients(lowSpec) {
+  const detail = lowSpec ? 0.5 : 1;
+  for (const ing of CONFIG.INGREDIENTS) {
+    let geom;
+    switch (ing.name) {
+      case "rice":
+        geom = new THREE.SphereGeometry(ing.size, Math.max(4, 6 * detail), 4);
+        geom.scale(1.6, 0.7, 0.7);
+        break;
+      case "meat":
+        geom = new THREE.BoxGeometry(ing.size * 2.2, ing.size * 0.35, ing.size * 1.5);
+        break;
+      case "onion":
+        geom = new THREE.TorusGeometry(ing.size * 0.8, ing.size * 0.22, 5, 10, Math.PI * 1.2);
+        break;
+      case "ginger":
+        geom = new THREE.BoxGeometry(ing.size * 1.8, ing.size * 0.3, ing.size * 0.5);
+        break;
+      default: // drop / sparkle / 追加具材の既定形状
+        geom = new THREE.SphereGeometry(ing.size, Math.max(4, 8 * detail), 6);
+    }
+    const mat = (ing.name === "sparkle")
+      ? new THREE.MeshBasicMaterial({ color: ing.color, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false })
+      : (ing.name === "drop")
+        ? new THREE.MeshStandardMaterial({ color: ing.color, roughness: 0.15, metalness: 0.1 })
+        : new THREE.MeshStandardMaterial({ color: ing.color, roughness: 0.65, flatShading: true });
+    const mesh = new THREE.InstancedMesh(geom, mat, ing.maxCount);
+    mesh.count = 0; // 表示数はupdateParticles()がcountで制御（maxCountは生成時固定）
+    // パターン運動用の乱数シードと現在位置バッファ
+    const seeds = [];
+    const pos = new Float32Array(ing.maxCount * 3);
+    for (let i = 0; i < ing.maxCount; i++) {
+      seeds.push({ r1: Math.random(), r2: Math.random(), r3: Math.random(), r4: Math.random() });
+      pos[i * 3] = (Math.random() - 0.5) * 3.2;
+      pos[i * 3 + 1] = 1 + Math.random() * 2.5;
+      pos[i * 3 + 2] = (Math.random() - 0.5) * 1.4;
+    }
+    mesh.userData.seeds = seeds;
+    mesh.userData.pos = pos;
+    scene.add(mesh);
+    ingredientMeshes[ing.name] = mesh;
+  }
+}
+
+/** 背景: 遠景シルエット（SVG）＋星・雨・雪パーティクル */
+function buildBackgroundEffects(lowSpec) {
+  // 遠景ビルのシルエット（DOM/SVG。canvasの背面）
+  const container = document.getElementById("scene-container");
+  const heights = [28, 46, 34, 60, 40, 72, 50, 38, 64, 44, 30, 55];
+  let x = 0;
+  let rects = "";
+  for (const h of heights) {
+    const w = 26 + (h % 3) * 8;
+    rects += `<rect x="${x}" y="${90 - h}" width="${w}" height="${h}" />`;
+    x += w + 4;
+  }
+  const svg = document.createElement("div");
+  svg.id = "skyline";
+  svg.innerHTML =
+    `<svg viewBox="0 0 ${x} 90" preserveAspectRatio="none" style="display:block;width:100%;height:14vh;fill:#04070f;">${rects}</svg>`;
+  container.insertBefore(svg, container.firstChild);
+
+  // 星（夜×晴れ系のみ表示。updateBackground()が可視を制御）
+  const starCount = lowSpec ? 60 : 150;
+  const starPos = new Float32Array(starCount * 3);
+  for (let i = 0; i < starCount; i++) {
+    starPos[i * 3] = (Math.random() - 0.5) * 14;
+    starPos[i * 3 + 1] = 2 + Math.random() * 7;
+    starPos[i * 3 + 2] = -6 - Math.random() * 4;
+  }
+  bgEffects.stars = makePoints(starPos, 0xcfd8ff, 0.05, 0.9);
+
+  // 雨・雪（該当天気のみ表示）
+  bgEffects.rain = makePoints(randomBoxPositions(lowSpec ? 120 : 300), 0x8fa8cc, 0.03, 0.55);
+  bgEffects.snow = makePoints(randomBoxPositions(lowSpec ? 80 : 200), 0xf0f4ff, 0.06, 0.8);
+}
+
+function makePoints(positions, color, size, opacity) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({
+    color, size, transparent: true, opacity, depthWrite: false,
+  }));
+  pts.visible = false;
+  scene.add(pts);
+  return pts;
+}
+
+function randomBoxPositions(count) {
+  const arr = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    arr[i * 3] = (Math.random() - 0.5) * 6;
+    arr[i * 3 + 1] = Math.random() * 6;
+    arr[i * 3 + 2] = (Math.random() - 0.5) * 3 - 0.5;
+  }
+  return arr;
+}
+
+/** 端末時刻→時間帯（朝5-10/昼10-16/夕16-19/夜19-5。設計書5-3） */
+function timeBandOf(hour) {
+  const b = CONFIG.BACKGROUNDS.timeBands;
+  if (hour >= b.morning[0] && hour < b.morning[1]) return "morning";
+  if (hour >= b.day[0] && hour < b.day[1]) return "day";
+  if (hour >= b.evening[0] && hour < b.evening[1]) return "evening";
+  return "night";
+}
+
+/** weatherState→背景の天気キー（雪>雨(雷雨含む)>強風>暑い日>寒い日>曇り/霧>晴れ） */
+function bgWeatherKey(state) {
+  if (!state) return "clear";
+  const cat = wmoToCategory(state.code);
+  if (cat === "snow") return "snow";
+  if (cat === "rain" || cat === "thunder") return "rain";
+  if (state.windSpeed >= CONFIG.WIND_BRANCH_SPEED) return "wind";
+  if (state.temperature >= CONFIG.HOT_DAY_TEMP) return "hot";
+  if (state.temperature <= CONFIG.COLD_DAY_TEMP) return "cold";
+  if (cat === "cloudy" || cat === "fog") return "cloudy";
+  return "clear";
+}
+
+/** 時間帯×天気で背景（グラデ空・星・雨/雪パーティクル）を切り替える */
+function updateBackground() {
+  if (!sceneReady) return;
+  const band = timeBandOf(new Date().getHours());
+  const key = bgWeatherKey(weatherState);
+  const sky = CONFIG.BACKGROUNDS.sky[band];
+  const wx = CONFIG.BACKGROUNDS.weather[key];
+
+  const container = document.getElementById("scene-container");
+  const tintLayer = wx.tint
+    ? `linear-gradient(180deg, ${wx.tint}59 0%, ${wx.tint}26 100%), `
+    : "";
+  container.style.background =
+    `${tintLayer}linear-gradient(180deg, ${sky.top} 0%, ${sky.bottom} 100%)`;
+
+  bgEffects.stars.visible = (band === "night" && (key === "clear" || key === "cold"));
+  bgEffects.rain.visible = (wx.particles === "rain");
+  bgEffects.snow.visible = (wx.particles === "snow");
+}
+
+/** 丸いソフト粒子テクスチャ（Pointsの点は素では正方形に描画されるため） */
+function makeSoftCircleTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d");
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, "rgba(255,255,255,0.9)");
+  g.addColorStop(0.5, "rgba(255,255,255,0.35)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+
+/** 湯気（丼の上に立ちのぼる。量はbowlParams.steamで制御） */
+function buildSteam(lowSpec) {
+  const n = lowSpec ? 15 : 30;
+  const arr = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    arr[i * 3] = (Math.random() - 0.5) * 0.9;
+    arr[i * 3 + 1] = 1.0 + Math.random() * 1.4;
+    arr[i * 3 + 2] = (Math.random() - 0.5) * 0.5;
+  }
+  bgEffects.steam = makePoints(arr, 0xf0f0f0, 0.4, 0);
+  bgEffects.steam.material.map = makeSoftCircleTexture();
+  bgEffects.steam.material.needsUpdate = true;
+}
+
+/** 背景の雨/雪の落下と湯気の上昇（具材のパターン運動はupdateParticles()） */
+function updateBgParticles(dt) {
+  for (const [name, speed] of [["rain", 5.5], ["snow", 0.7]]) {
+    const pts = bgEffects[name];
+    if (!pts || !pts.visible) continue;
+    const pos = pts.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      let y = pos.getY(i) - speed * dt;
+      if (y < 0) y = 6;
+      pos.setY(i, y);
+      if (name === "snow") pos.setX(i, pos.getX(i) + Math.sin(y * 2 + i) * 0.3 * dt);
+    }
+    pos.needsUpdate = true;
+  }
+  const steam = bgEffects.steam;
+  if (steam && steam.visible) {
+    const pos = steam.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      let y = pos.getY(i) + (0.35 + (i % 5) * 0.05) * dt;
+      if (y > 2.6) y = 1.0;
+      pos.setY(i, y);
+      pos.setX(i, pos.getX(i) + Math.sin(y * 3 + i) * 0.12 * dt);
+    }
+    pos.needsUpdate = true;
+  }
+}
+
+/* ---- パターン別の具材運動（アプリの心臓部・引き継ぎ仕様書5章） ---- */
+
+const LERP_RATE = 0.02; // targetParamsへの接近率。「ぬるっと」遷移の要（変更・削除禁止）
+
+/** bowlParams→targetParamsへ毎フレームlerpで接近させる（直接代入禁止） */
+function lerpParams() {
+  for (const k in bowlParams) {
+    bowlParams[k] += (targetParams[k] - bowlParams[k]) * LERP_RATE;
+  }
+}
+
+/** bowlParamsをフォグ・ミルク色オーバーレイ・湯気に反映する */
+let fogOverlayEl = null;
+function updateEffects() {
+  fogEffect.density = bowlParams.turbidity * 0.3;
+  if (!fogOverlayEl) fogOverlayEl = document.getElementById("fog-overlay");
+  fogOverlayEl.style.opacity = (bowlParams.turbidity * 0.5).toFixed(3);
+  const steam = bgEffects.steam;
+  if (steam) {
+    steam.visible = bowlParams.steam > 0.02;
+    steam.material.opacity = bowlParams.steam * 0.4;
+  }
+}
+
+/** 具材種別→表示数の割合（0〜1）。天気取得前は表示しない */
+function countFraction(name) {
+  if (!weatherState) return 0;
+  const pat = appState.pattern;
+  let frac;
+  if (name === "rice") frac = bowlParams.riceAmount;
+  else if (name === "meat") frac = bowlParams.meatAmount;
+  else if (name === "sparkle") frac = (pat === "澄み型") ? 0.5 : 0.3;
+  else frac = bowlParams.meatAmount * 0.8; // 玉ねぎ・つゆ滴・紅しょうが・追加具材
+  if (pat === "澄み型" && name !== "sparkle") frac *= 0.1; // 澄み型は少数が漂うのみ
+  return Math.min(1, frac);
+}
+
+/**
+ * パターン別の目標位置を計算する（out={x,y,z}に書き込む）。
+ * 座標系: 丼中心が原点。可視域はおよそ x±1.8 / y 0〜3.9 / z±0.9
+ */
+const TMP_POS = { x: 0, y: 0, z: 0 };
+function computePatternTarget(pattern, s, i, t, out) {
+  const sc = bowlParams.scatter;
+  const dr = bowlParams.drift;
+  switch (pattern) {
+    case "澄み型": { // 具材はほぼ丼に収まり静止。少数がキラキラとゆっくり漂う
+      const ang = s.r2 * Math.PI * 2 + t * 0.05 * (s.r3 - 0.5);
+      const R = 0.25 + s.r1 * 0.75; // ほぼ丼の半径内
+      out.x = Math.cos(ang) * R;
+      out.y = 0.85 + s.r4 * 0.8 + Math.sin(t * 0.4 + i) * 0.08; // 丼のすぐ上に低く漂う
+      out.z = Math.sin(ang) * R * 0.4;
+      break;
+    }
+    case "白濁型": { // ミルク色の霧の中、米粒が雪のように舞い降りる
+      const speed = 0.25 + s.r3 * 0.3;
+      out.x = (s.r1 - 0.5) * 3.4 + Math.sin(t * 0.5 + i) * 0.25;
+      out.y = 3.9 - ((t * speed + s.r2 * 3.5) % 3.5);
+      out.z = (s.r4 - 0.5) * 1.6;
+      break;
+    }
+    case "浮遊型": { // 中層〜上層にふわふわ浮遊
+      out.x = (s.r1 - 0.5) * 3.2 + Math.sin(t * 0.3 + i * 1.7) * (0.2 + sc * 0.4);
+      out.y = 1.3 + s.r2 * 2.2 + Math.sin(t * 0.5 + i) * (0.15 + sc * 0.3);
+      out.z = (s.r3 - 0.5) * 1.5;
+      break;
+    }
+    case "沈殿型": { // 丼にどっしり沈殿・堆積（＋湯気はupdateEffects側）
+      const R = s.r1 * 0.85;
+      const ang = s.r2 * Math.PI * 2;
+      out.x = Math.cos(ang) * R;
+      out.y = 0.5 + 0.475 * Math.sqrt(Math.max(0, 1 - (R / 0.95) ** 2)) + 0.05
+            + Math.sin(t * 0.8 + i) * 0.01;
+      out.z = Math.sin(ang) * R;
+      break;
+    }
+    case "結晶型": { // 上部に結晶状の枝＋全体が激しく散らばる（大荒れ牛丼）
+      if (s.r4 < 0.5) {
+        out.x = (s.r1 - 0.5) * 3.6 + Math.sin(t * (1.5 + s.r2) + i) * 0.9;
+        out.y = 0.9 + s.r2 * 3.0 + Math.cos(t * 1.7 + i * 2) * 0.7;
+        out.z = (s.r3 - 0.5) * 1.6;
+      } else {
+        const arm = Math.floor(s.r1 * 6); // 6本の放射枝
+        const armAng = arm * Math.PI / 3 + Math.sin(t * 0.3) * 0.05;
+        const d = s.r2 * 1.5;
+        out.x = Math.cos(armAng) * d;
+        out.y = 3.0 + Math.sin(armAng) * d * 0.45;
+        out.z = -0.5;
+      }
+      break;
+    }
+    case "枝状型": { // 筋状・枝状の流線に沿って横方向にたなびく
+      const row = Math.floor(s.r1 * 5);
+      const speed = (0.5 + s.r3 * 0.8) * (0.4 + dr);
+      out.x = ((s.r2 * 3.8 + t * speed) % 3.8) - 1.9;
+      out.y = 1.1 + row * 0.55 + Math.sin(out.x * 1.6 + row * 2) * 0.15;
+      out.z = (s.r4 - 0.5) * 1.2;
+      break;
+    }
+  }
+}
+
+/** 流れ系パターン（座標がラップ移動する）は追従補間せず直接配置する */
+const FLOW_PATTERNS = ["白濁型", "枝状型"];
+const particleDummy = new THREE.Object3D();
+
+/** パターン別の具材運動。パターン切替後1.5秒は目標へ緩やかに追従して「ぬるっと」遷移 */
+function updateParticles(dt, t) {
+  const inTransition = (t - patternChangedAt) < 1.5;
+  const direct = !inTransition && FLOW_PATTERNS.includes(appState.pattern);
+  const ease = Math.min(1, dt * 2.5);
+  for (const ing of CONFIG.INGREDIENTS) {
+    const mesh = ingredientMeshes[ing.name];
+    if (!mesh) continue;
+    mesh.count = Math.round(countFraction(ing.name) * ing.maxCount);
+    if (mesh.count === 0) continue;
+    const seeds = mesh.userData.seeds;
+    const pos = mesh.userData.pos;
+    for (let i = 0; i < mesh.count; i++) {
+      computePatternTarget(appState.pattern, seeds[i], i, t, TMP_POS);
+      const j = i * 3;
+      if (direct) {
+        pos[j] = TMP_POS.x; pos[j + 1] = TMP_POS.y; pos[j + 2] = TMP_POS.z;
+      } else {
+        pos[j]     += (TMP_POS.x - pos[j]) * ease;
+        pos[j + 1] += (TMP_POS.y - pos[j + 1]) * ease;
+        pos[j + 2] += (TMP_POS.z - pos[j + 2]) * ease;
+      }
+      particleDummy.position.set(pos[j], pos[j + 1], pos[j + 2]);
+      particleDummy.rotation.set(t * (0.3 + seeds[i].r3), t * 0.5 * seeds[i].r4, 0);
+      particleDummy.updateMatrix();
+      mesh.setMatrixAt(i, particleDummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
+let lastFrameTime = 0;
+
+/** rAFループ: lerp遷移 → エフェクト反映 → 背景・具材の運動 → 描画 */
+function animate(t) {
+  requestAnimationFrame(animate);
+  const dt = Math.min((t - lastFrameTime) / 1000, 0.1);
+  lastFrameTime = t;
+  const tSec = t / 1000;
+  lerpParams();
+  updateEffects();
+  updateBgParticles(dt);
+  updateParticles(dt, tSec);
+  renderer.render(scene, camera);
+}
+
+function onResize() {
+  const container = document.getElementById("scene-container");
+  camera.aspect = container.clientWidth / container.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(container.clientWidth, container.clientHeight);
+}
+
+/** WebGL非対応・CDN読込失敗時の案内（設計書9章） */
+function showSceneFallback() {
+  const container = document.getElementById("scene-container");
+  const div = document.createElement("div");
+  div.id = "scene-fallback";
+  div.textContent = "お使いの端末では表示できません";
+  container.appendChild(div);
+}
+
+/* =====================================================================
+ * ⑥ UI … 時計・情報パネル・操作ボタン・待受モード
+ * ===================================================================== */
+
+/** 天気カテゴリ→表示ラベル・アイコン画像（assets/=ユーザー支給素材。霧は曇り・雷雨は雨の画像を流用） */
+const WEATHER_DISPLAY = {
+  clear:   { label: "晴れ", icon: "assets/wx-clear.png" },
+  cloudy:  { label: "曇り", icon: "assets/wx-cloudy.png" },
+  fog:     { label: "霧",   icon: "assets/wx-cloudy.png" },
+  rain:    { label: "雨",   icon: "assets/wx-rain.png" },
+  snow:    { label: "雪",   icon: "assets/wx-snow.png" },
+  thunder: { label: "雷雨", icon: "assets/wx-rain.png" },
+};
+const WX_WIND_ICON = "assets/wx-wind.png"; // 強風（枝状型しきい値以上）のとき優先表示
+
+/**
+ * WMO天気コード→カテゴリ（Open-Meteo公式コード表準拠。0〜99で歯抜けあり）
+ * 変更時は公式コード表を確認すること（引き継ぎ仕様書10章）
+ */
+function wmoToCategory(code) {
+  if (code === 0 || code === 1) return "clear";
+  if (code === 2 || code === 3) return "cloudy";
+  if (code === 45 || code === 48) return "fog";
+  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return "rain";
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) return "snow";
+  if (code >= 95 && code <= 99) return "thunder";
+  console.warn("未知のWMOコード:", code, "（曇り扱いで表示を継続）");
+  return "cloudy";
+}
+
+/** 情報パネル・上部の天気表示をweatherStateから更新する */
+function updateOverlay() {
+  if (!weatherState) return;
+  const w = weatherState;
+  const disp = WEATHER_DISPLAY[wmoToCategory(w.code)];
+  const precipText = (w.precipProbability === null || w.precipProbability === undefined)
+    ? "--%" : `${w.precipProbability}%`;
+
+  document.getElementById("place-name").textContent = w.place;
+  document.getElementById("weather-detail").textContent = `${disp.label} / 降水 ${precipText}`;
+  document.getElementById("temp-main").textContent = `${Math.round(w.temperature)}℃`;
+  document.getElementById("feels-like").textContent = ` Feels like ${Math.round(w.apparentTemp)}℃`;
+  document.getElementById("humidity-wind").textContent = `湿度 ${w.humidity}% / 風速 ${Number(w.windSpeed).toFixed(1)}m/s`;
+  const iconEl = document.getElementById("weather-icon");
+  const iconSrc = (w.windSpeed >= CONFIG.WIND_BRANCH_SPEED) ? WX_WIND_ICON : disp.icon;
+  if (iconEl.getAttribute("src") !== iconSrc) iconEl.src = iconSrc;
+  iconEl.alt = disp.label;
+  iconEl.hidden = false;
+  document.getElementById("weather-label").textContent = disp.label;
+  document.getElementById("updated-at").textContent = w.fetchedAt
+    ? `更新 ${String(w.fetchedAt.getHours()).padStart(2, "0")}:${String(w.fetchedAt.getMinutes()).padStart(2, "0")}`
+    : "デモ表示中";
+
+  updateBackground(); // 天気が変われば背景も追従（シーン未構築時は内部でスキップ）
+}
+
+/** HTMLエスケープ（ニュース見出し・URLは外部由来のため必須。XSS対策） */
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+/**
+ * ニュースティッカーの描画。見出しを「◆」区切りで流し、長さに応じて速度を一定に保つ。
+ * 各見出しはリンクになっており、タップで記事を新規タブで開く
+ */
+function renderNewsTicker() {
+  const ticker = document.getElementById("news-ticker");
+  const track = document.getElementById("news-track");
+  if (newsItems.length === 0) {
+    ticker.classList.add("hidden");
+    return;
+  }
+  track.innerHTML = newsItems.map((item) => {
+    const title = escapeHtml(item.title);
+    const isSafeLink = /^https?:\/\//.test(item.link);
+    return isSafeLink
+      ? `<a href="${escapeHtml(item.link)}" target="_blank" rel="noopener">${title}</a>`
+      : title;
+  }).join("　◆　");
+  ticker.classList.remove("hidden");
+  const duration = Math.max(20, Math.round(track.scrollWidth / 55)); // 約55px/秒
+  track.style.animationDuration = `${duration}s`;
+}
+
+/** 画面下部のStorm名・Pattern名表示（例: Storm: 牛丼乱気流 / Pattern: 浮遊型） */
+function updateStormLabel() {
+  document.getElementById("storm-name").textContent =
+    `Storm: ${CONFIG.STORM_NAMES[appState.pattern] || "--"}`;
+  document.getElementById("pattern-name").textContent = `Pattern: ${appState.pattern}`;
+}
+
+/** ローディング表示（UI指示書F） */
+function showLoading() { document.getElementById("loading").classList.remove("hidden"); }
+function hideLoading() { document.getElementById("loading").classList.add("hidden"); }
+
+/* ---- 操作ボタン・モード（UI指示書E / 設計書5-2） ---- */
+
+const SETTINGS_STORAGE_KEY = "stormGyudonSettings";
+
+/** 卵とUIモードの設定を保存（localStorage不可の環境では静かに諦める） */
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+      eggMode: appState.eggMode,
+      minimalUI: appState.minimalUI,
+    }));
+  } catch (e) { /* プライベートモード等。機能低下のみ */ }
+}
+
+/** 保存済み設定を読み込みappStateへ反映（initの最初期・シーン構築前に呼ぶ） */
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || "{}");
+    if (s.eggMode === "raw" || s.eggMode === "onsen") appState.eggMode = s.eggMode;
+    if (typeof s.minimalUI === "boolean") appState.minimalUI = s.minimalUI;
+  } catch (e) { /* 壊れたデータは既定値で続行 */ }
+}
+
+/** 「卵チェンジ」: 生卵 ⇔ 温玉。localStorageに保存し再読み込み後も維持 */
+function toggleEgg() {
+  appState.eggMode = (appState.eggMode === "raw") ? "onsen" : "raw";
+  if (eggMesh && EGG_MATERIALS[appState.eggMode]) {
+    eggMesh.material = EGG_MATERIALS[appState.eggMode];
+  }
+  saveSettings();
+}
+
+/** 「待受モード」: 時計＋牛丼のみの最小UI。タップで復帰 */
+function toggleMinimalUI(force) {
+  appState.minimalUI = (typeof force === "boolean") ? force : !appState.minimalUI;
+  document.getElementById("app").classList.toggle("minimal", appState.minimalUI);
+  saveSettings();
+}
+
+/** ボタン配線＋待受モードのタップ復帰 */
+function wireButtons() {
+  document.getElementById("btn-minimal").addEventListener("click", () => toggleMinimalUI());
+  document.getElementById("btn-refresh").addEventListener("click", () => {
+    if (lastLocation) {
+      fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
+    }
+  });
+  document.getElementById("btn-pattern").addEventListener("click", cyclePattern);
+  document.getElementById("btn-undo").addEventListener("click", undoPattern);
+  document.getElementById("btn-egg").addEventListener("click", toggleEgg);
+
+  // 待受モード中は画面のどこをタップしても復帰（切替直後のボタン自身のクリックは除外）
+  document.addEventListener("click", (e) => {
+    if (!appState.minimalUI) return;
+    if (e.target.closest("#buttons")) return;
+    toggleMinimalUI(false);
+  });
+}
+
+/** Wake Lock: スリープ防止。非対応・拒否は静かに無視（設計書9章） */
+let wakeLock = null;
+async function requestWakeLock() {
+  if (!("wakeLock" in navigator)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+  } catch (err) {
+    console.warn("Wake Lockを取得できません（スリープ防止のみ無効）:", err.message);
+  }
+}
+
+/** エラー表示（UI指示書F。前回値があれば背後で表示継続） */
+function showError() { document.getElementById("error-banner").classList.remove("hidden"); }
+function hideError() { document.getElementById("error-banner").classList.add("hidden"); }
+
+let lastTimeBand = null;
+
+/** 時計・日付を更新する（1秒ごと）。時間帯が変わったら背景も切り替える */
+function updateClock() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  document.getElementById("clock").innerHTML = `${hh}:${mm}<span class="sec">:${ss}</span>`;
+  document.getElementById("date-line").textContent = now.toLocaleDateString("ja-JP", {
+    month: "long", day: "numeric", weekday: "long",
+  });
+
+  const band = timeBandOf(now.getHours());
+  if (band !== lastTimeBand) {
+    lastTimeBand = band;
+    updateBackground();
+  }
+}
+
+/* =====================================================================
+ * ⑦ 起動処理 … init()
+ * ===================================================================== */
+
+async function init() {
+  // 保存済み設定（卵・待受モード）を最初に復元
+  loadSettings();
+  if (appState.minimalUI) {
+    document.getElementById("app").classList.add("minimal");
+  }
+
+  // バージョン表示（画面右下に常時）
+  document.getElementById("version").textContent = APP_VERSION;
+
+  // 時計（CONFIG.SHOW_CLOCK=falseなら非表示）
+  if (CONFIG.SHOW_CLOCK) {
+    updateClock();
+    setInterval(updateClock, 1000);
+  } else {
+    document.getElementById("clock").classList.add("hidden");
+  }
+
+  // 操作ボタン＋Wake Lock（可視復帰時の再取得を含む）
+  wireButtons();
+  requestWakeLock();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") requestWakeLock();
+  });
+
+  // ローディング表示 → 位置取得 → 天気取得（設計書3章 STEP1〜3）
+  showLoading();
+  try {
+    lastLocation = await getLocation();
+    await fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
+  } catch (err) {
+    // unexpected系: ここに来るのは想定外の例外のみ（network/permissionは各関数内で処理済み）
+    console.error("初期化中に予期しないエラーが発生しました:", err);
+    showError();
+  } finally {
+    hideLoading();
+  }
+
+  // 3Dシーン構築 → 描画ループ開始（設計書3章 STEP5）
+  // WebGL非対応・CDN読込失敗でもUI（時計・天気情報）は生かしたまま案内を出す
+  try {
+    if (!window.THREE) throw new Error("Three.jsを読み込めませんでした");
+    initScene();
+    updateBackground();
+    requestAnimationFrame(animate);
+  } catch (err) {
+    console.error("3Dシーンの初期化に失敗しました:", err);
+    showSceneFallback();
+  }
+
+  // 30分ごとの自動更新（設計書3章 STEP7。STEP 5で「鑑賞モード解除」もここに載る）
+  setInterval(() => {
+    if (lastLocation) {
+      fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
+    }
+  }, CONFIG.UPDATE_INTERVAL_MIN * 60 * 1000);
+
+  // グルメニュース（拡張機能）: 初回取得＋定期更新。失敗してもアプリ本体に影響しない
+  fetchGourmetNews();
+  setInterval(fetchGourmetNews, CONFIG.NEWS.UPDATE_INTERVAL_MIN * 60 * 1000);
+
+  // Service Worker登録（PWA・オフライン対応）。非対応・file://等では静かにスキップ。
+  // sw.jsのCACHE_VERSIONはindex.html更新のたびに必ず上げること（仕様書10章）
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js").catch((err) => {
+      console.warn("Service Worker登録に失敗（オフライン対応のみ無効）:", err.message);
+    });
+  }
+}
+
+init();
+</script>
+</body>
+</html>
