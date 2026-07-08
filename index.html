@@ -105,30 +105,25 @@
     justify-content: space-between;
   }
 
-  /* ============ グルメニュースティッカー（拡張機能） ============ */
+  /* ============ グルメニュース（拡張機能・1件ずつローテーション表示） ============ */
   #news-ticker {
     margin: 0 16px 8px;
-    padding: 6px 0;
-    overflow: hidden;
     background: rgba(10, 16, 32, 0.6);
     border: 1px solid rgba(200, 170, 100, 0.14);
     border-radius: 10px;
     font-size: 12px;
     z-index: 10;
   }
-  #news-track {
-    display: inline-block;
-    white-space: nowrap;
-    padding-left: 100%; /* 右端の外からゆっくり流入させる */
-    animation: ticker-flow 40s linear infinite;
+  #news-item {
+    display: block;
+    padding: 8px 14px;
     color: #cfd6e4;
+    text-decoration: none;
+    line-height: 1.5;
+    transition: opacity 0.4s ease;
   }
-  @keyframes ticker-flow {
-    from { transform: translateX(0); }
-    to   { transform: translateX(-100%); }
-  }
-  #news-track a { color: inherit; text-decoration: none; }
-  #news-track a:hover, #news-track a:active { color: #d9b96a; text-decoration: underline; }
+  #news-item:hover, #news-item:active { color: #d9b96a; }
+  .news-date { color: #d9b96a; font-size: 11px; margin-right: 8px; }
   #app.minimal #news-ticker { display: none; }
 
   /* ============ 操作ボタンエリア（動作はSTEP 5で実装） ============ */
@@ -247,8 +242,8 @@
     </div>
   </section>
 
-  <!-- グルメニュースティッカー（拡張機能。取得失敗時は非表示のまま） -->
-  <div id="news-ticker" class="hidden"><span id="news-track"></span></div>
+  <!-- グルメニュース（拡張機能。1件ずつローテーション表示・取得失敗時は非表示のまま） -->
+  <div id="news-ticker" class="hidden"><a id="news-item" target="_blank" rel="noopener"></a></div>
 
   <!-- 操作ボタン5つ（UI指示書E） -->
   <nav id="buttons">
@@ -280,7 +275,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.10";
+const APP_VERSION = "v0.11";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -392,7 +387,8 @@ const CONFIG = {
     FEED_URL: "https://gourmet.watch.impress.co.jp/data/rss/1.0/grw/feed.rdf", // グルメWatch
     CONVERTER: "https://api.rss2json.com/v1/api.json?rss_url=",
     UPDATE_INTERVAL_MIN: 30, // ニュースの自動更新間隔（分）
-    MAX_ITEMS: 8,            // ティッカーに流す最大件数
+    MAX_ITEMS: 8,            // ローテーションする最大件数
+    ROTATE_SEC: 8,           // 1件あたりの表示秒数（1件ずつ順に切替）
   },
 };
 
@@ -411,6 +407,9 @@ let retryTimerId = null;
 
 /** グルメニュースの見出しリスト（取得失敗時は空のまま＝ティッカー非表示） */
 let newsItems = [];
+/** 現在表示中のニュース番号とローテーションタイマー */
+let newsIndex = 0;
+let newsRotateTimerId = null;
 
 /** アプリ状態（設計書6章）。eggMode/minimalUIのlocalStorage保存はSTEP 5で実装 */
 let appState = {
@@ -572,12 +571,15 @@ async function fetchGourmetNews() {
       .map((item) => ({
         title: (item.title || "").trim(),
         link: (item.link || "").trim(),
+        pubDate: (item.pubDate || "").trim(),
       }))
       .filter((item) => item.title);
-    renderNewsTicker();
+    newsIndex = 0;
+    renderNewsItem();
+    startNewsRotation();
   } catch (err) {
     console.warn("グルメニュースの取得に失敗（ティッカー非表示で継続）:", err.message);
-    if (newsItems.length === 0) renderNewsTicker(); // 初回失敗時は確実に非表示へ
+    if (newsItems.length === 0) renderNewsItem(); // 初回失敗時は確実に非表示へ
   }
 }
 
@@ -1249,34 +1251,54 @@ function updateOverlay() {
   updateBackground(); // 天気が変われば背景も追従（シーン未構築時は内部でスキップ）
 }
 
-/** HTMLエスケープ（ニュース見出し・URLは外部由来のため必須。XSS対策） */
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) => (
-    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
-  ));
+/** 記事の日付表示（例: 7/8(水)）。不正な日付は空文字 */
+function newsDateLabel(pubDate) {
+  const d = new Date((pubDate || "").replace(" ", "T"));
+  if (isNaN(d.getTime())) return "";
+  const wd = ["日", "月", "火", "水", "木", "金", "土"][d.getDay()];
+  return `${d.getMonth() + 1}/${d.getDate()}(${wd})`;
 }
 
 /**
- * ニュースティッカーの描画。見出しを「◆」区切りで流し、長さに応じて速度を一定に保つ。
- * 各見出しはリンクになっており、タップで記事を新規タブで開く
+ * ニュースを1件ずつ表示する（タイトル全文＋記事日付・タップで記事へ）。
+ * 切替はフェード。外部由来テキストはtextContentで挿入（XSS対策）
  */
-function renderNewsTicker() {
+function renderNewsItem() {
   const ticker = document.getElementById("news-ticker");
-  const track = document.getElementById("news-track");
+  const el = document.getElementById("news-item");
   if (newsItems.length === 0) {
     ticker.classList.add("hidden");
     return;
   }
-  track.innerHTML = newsItems.map((item) => {
-    const title = escapeHtml(item.title);
-    const isSafeLink = /^https?:\/\//.test(item.link);
-    return isSafeLink
-      ? `<a href="${escapeHtml(item.link)}" target="_blank" rel="noopener">${title}</a>`
-      : title;
-  }).join("　◆　");
   ticker.classList.remove("hidden");
-  const duration = Math.max(20, Math.round(track.scrollWidth / 55)); // 約55px/秒
-  track.style.animationDuration = `${duration}s`;
+  const item = newsItems[newsIndex % newsItems.length];
+  el.style.opacity = "0";
+  setTimeout(() => {
+    el.textContent = "";
+    const date = newsDateLabel(item.pubDate);
+    if (date) {
+      const span = document.createElement("span");
+      span.className = "news-date";
+      span.textContent = date;
+      el.appendChild(span);
+    }
+    el.appendChild(document.createTextNode(item.title));
+    if (/^https?:\/\//.test(item.link)) {
+      el.href = item.link;
+    } else {
+      el.removeAttribute("href");
+    }
+    el.style.opacity = "1";
+  }, 400);
+}
+
+/** ニュースのローテーション開始（既存タイマーは張り替え） */
+function startNewsRotation() {
+  if (newsRotateTimerId !== null) clearInterval(newsRotateTimerId);
+  newsRotateTimerId = setInterval(() => {
+    newsIndex++;
+    renderNewsItem();
+  }, CONFIG.NEWS.ROTATE_SEC * 1000);
 }
 
 /** 画面下部のStorm名・Pattern名表示（例: Storm: 牛丼乱気流 / Pattern: 浮遊型） */
