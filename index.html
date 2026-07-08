@@ -127,6 +127,8 @@
     from { transform: translateX(0); }
     to   { transform: translateX(-100%); }
   }
+  #news-track a { color: inherit; text-decoration: none; }
+  #news-track a:hover, #news-track a:active { color: #d9b96a; text-decoration: underline; }
   #app.minimal #news-ticker { display: none; }
 
   /* ============ 操作ボタンエリア（動作はSTEP 5で実装） ============ */
@@ -278,7 +280,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.9";
+const APP_VERSION = "v0.10";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -567,8 +569,11 @@ async function fetchGourmetNews() {
     }
     newsItems = data.items
       .slice(0, CONFIG.NEWS.MAX_ITEMS)
-      .map((item) => (item.title || "").trim())
-      .filter(Boolean);
+      .map((item) => ({
+        title: (item.title || "").trim(),
+        link: (item.link || "").trim(),
+      }))
+      .filter((item) => item.title);
     renderNewsTicker();
   } catch (err) {
     console.warn("グルメニュースの取得に失敗（ティッカー非表示で継続）:", err.message);
@@ -1244,7 +1249,17 @@ function updateOverlay() {
   updateBackground(); // 天気が変われば背景も追従（シーン未構築時は内部でスキップ）
 }
 
-/** ニュースティッカーの描画。見出しを「◆」区切りで流し、長さに応じて速度を一定に保つ */
+/** HTMLエスケープ（ニュース見出し・URLは外部由来のため必須。XSS対策） */
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+/**
+ * ニュースティッカーの描画。見出しを「◆」区切りで流し、長さに応じて速度を一定に保つ。
+ * 各見出しはリンクになっており、タップで記事を新規タブで開く
+ */
 function renderNewsTicker() {
   const ticker = document.getElementById("news-ticker");
   const track = document.getElementById("news-track");
@@ -1252,7 +1267,13 @@ function renderNewsTicker() {
     ticker.classList.add("hidden");
     return;
   }
-  track.textContent = newsItems.join("　◆　");
+  track.innerHTML = newsItems.map((item) => {
+    const title = escapeHtml(item.title);
+    const isSafeLink = /^https?:\/\//.test(item.link);
+    return isSafeLink
+      ? `<a href="${escapeHtml(item.link)}" target="_blank" rel="noopener">${title}</a>`
+      : title;
+  }).join("　◆　");
   ticker.classList.remove("hidden");
   const duration = Math.max(20, Math.round(track.scrollWidth / 55)); // 約55px/秒
   track.style.animationDuration = `${duration}s`;
