@@ -11,7 +11,7 @@
  *   - 天気API（Open-Meteo）: ネット優先 → 失敗時キャッシュ（オフラインで前回値を表示）
  */
 
-const CACHE_VERSION = "v0.13-1";
+const CACHE_VERSION = "v0.14-1";
 const CACHE_NAME = `storm-gyudon-${CACHE_VERSION}`;
 
 const THREE_CDN = "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js";
@@ -56,9 +56,10 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // 天気API・グルメニュースAPI: ネット優先＋成功時キャッシュ、失敗時は前回キャッシュ
+  // 天気API・グルメニュースAPI: ネット優先＋成功時キャッシュ、失敗時は前回キャッシュ。
+  // ニュースはキャッシュ回避パラメータ(_t)でURLが変わるため、保存キーを正規化して肥大を防ぐ
   if (url.hostname.endsWith("open-meteo.com") || url.hostname.endsWith("rss2json.com")) {
-    event.respondWith(networkFirst(event.request));
+    event.respondWith(networkFirst(event.request, normalizeApiCacheKey(event.request.url)));
     return;
   }
 
@@ -72,14 +73,23 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(cacheFirst(event.request));
 });
 
-async function networkFirst(request) {
+/** rss_url内のキャッシュ回避パラメータ(_t)を除いた保存キーを返す */
+function normalizeApiCacheKey(u) {
+  const url = new URL(u);
+  const rss = url.searchParams.get("rss_url");
+  if (rss) url.searchParams.set("rss_url", rss.replace(/[?&]_t=\d+$/, ""));
+  return url.href;
+}
+
+async function networkFirst(request, cacheKey) {
   const cache = await caches.open(CACHE_NAME);
+  const key = cacheKey || request;
   try {
     const res = await fetch(request);
-    if (res && res.ok) cache.put(request, res.clone());
+    if (res && res.ok) cache.put(key, res.clone());
     return res;
   } catch (err) {
-    const cached = await cache.match(request, { ignoreSearch: request.mode === "navigate" });
+    const cached = await cache.match(key, { ignoreSearch: request.mode === "navigate" });
     if (cached) return cached;
     throw err;
   }

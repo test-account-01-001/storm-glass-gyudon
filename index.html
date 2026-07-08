@@ -290,7 +290,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.13";
+const APP_VERSION = "v0.14";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -585,7 +585,13 @@ async function fetchPlaceName(lat, lon) {
 async function fetchGourmetNews() {
   if (!CONFIG.NEWS.ENABLED) return;
   try {
-    const res = await fetch(CONFIG.NEWS.CONVERTER + encodeURIComponent(CONFIG.NEWS.FEED_URL));
+    // rss2jsonは同一rss_urlの変換結果をしばらくキャッシュして古い記事を返すため、
+    // 15分ごとに変わるダミーパラメータ(_t)で回避する（毎回ユニークにはせず負荷を抑える）。
+    // cache:"no-store" はブラウザ側の30分HTTPキャッシュ（Cache-Control）対策
+    const bust = Math.floor(Date.now() / (15 * 60 * 1000));
+    const sep = CONFIG.NEWS.FEED_URL.includes("?") ? "&" : "?";
+    const feedUrl = `${CONFIG.NEWS.FEED_URL}${sep}_t=${bust}`;
+    const res = await fetch(CONFIG.NEWS.CONVERTER + encodeURIComponent(feedUrl), { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (data.status !== "ok" || !Array.isArray(data.items)) {
@@ -1281,7 +1287,11 @@ function updateOverlay() {
 
 /** 記事の日付表示（例: 7/8(水)）。不正な日付は空文字 */
 function newsDateLabel(pubDate) {
-  const d = new Date((pubDate || "").replace(" ", "T"));
+  let s = (pubDate || "").trim();
+  // rss2jsonの日付は "YYYY-MM-DD HH:MM:SS"（UTC・時差表記なし）のためUTCとして解釈する。
+  // 現地時間として解釈すると日本では9時間ズレて深夜〜朝の記事が前日表示になる
+  if (s && !s.includes("T")) s = s.replace(" ", "T") + "Z";
+  const d = new Date(s);
   if (isNaN(d.getTime())) return "";
   const wd = ["日", "月", "火", "水", "木", "金", "土"][d.getDay()];
   return `${d.getMonth() + 1}/${d.getDate()}(${wd})`;
