@@ -290,7 +290,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.12";
+const APP_VERSION = "v0.13";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -1389,6 +1389,7 @@ function wireButtons() {
     if (lastLocation) {
       fetchWeather(lastLocation.lat, lastLocation.lon, { isDefault: lastLocation.isDefault });
     }
+    fetchGourmetNews(); // 「更新」で天気と一緒にニュースも再取得
   });
   document.getElementById("btn-pattern").addEventListener("click", cyclePattern);
   document.getElementById("btn-undo").addEventListener("click", undoPattern);
