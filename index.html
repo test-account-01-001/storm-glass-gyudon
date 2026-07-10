@@ -82,74 +82,103 @@
   }
 
   /* ============ 情報パネル ============ */
+  /* 天気カード: 3行構成のスリム設計。blurは廃止（にじみ・GPU負荷の原因） */
   #info-panel {
-    margin: 0 16px 10px;
-    padding: 12px 16px;
-    background: rgba(10, 16, 32, 0.72);
+    margin: 0 14px 6px;
+    padding: 10px 14px;
+    background: rgba(10, 16, 32, 0.8);
     border: 1px solid rgba(200, 170, 100, 0.18);
-    border-radius: 14px;
-    font-size: 13px;
-    line-height: 1.6;
-    backdrop-filter: blur(6px);
+    border-radius: 12px;
+    font-size: 12.5px;
+    line-height: 1.45;
     z-index: 10;
   }
   #place-line { display: flex; justify-content: space-between; align-items: baseline; }
-  #place-name { font-size: 15px; font-weight: 600; }
-  /* 重要な気温を大きく（UI改善指示書③） */
-  #temp-main { font-size: 38px; font-weight: 250; font-variant-numeric: tabular-nums; }
-  #humidity-wind { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
-  #humidity-wind svg { flex: none; opacity: 0.8; }
-  #humidity-wind .sep { opacity: 0.35; margin: 0 6px; }
+  #place-name { font-size: 14px; font-weight: 600; }
+  /* 気温・体感・湿度・風速を1行に統合（ベースライン揃え） */
+  #metrics-line { display: flex; align-items: baseline; gap: 8px; margin-top: 1px; white-space: nowrap; }
+  #temp-main { font-size: 30px; font-weight: 250; font-variant-numeric: tabular-nums; }
+  #metrics-line .sub { font-size: 12px; opacity: 0.8; }
+  #metrics-line .sep { opacity: 0.3; }
   #storm-line {
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px solid rgba(200, 170, 100, 0.25);
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(200, 170, 100, 0.22);
     color: #d9b96a;
-    font-size: 12.5px;
+    font-size: 12px;
     display: flex;
     justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
   }
-  /* パターンの意味補足（UI改善指示書⑦） */
-  #pattern-desc { margin-top: 5px; font-size: 11px; opacity: 0.75; }
+  /* パターンの意味補足はStorm行の下に控えめに */
+  #pattern-desc { margin-top: 2px; font-size: 10.5px; opacity: 0.65; }
 
-  /* ============ グルメニュース（拡張機能・1件ずつローテーション表示） ============ */
-  #news-ticker {
-    margin: 0 16px 8px;
-    background: rgba(10, 16, 32, 0.6);
+  /* ============ グルメニュースカード（サムネ付き・1件ずつローテーション） ============ */
+  #news-card {
+    margin: 0 14px 6px;
+    background: rgba(10, 16, 32, 0.8);
     border: 1px solid rgba(200, 170, 100, 0.14);
-    border-radius: 10px;
-    font-size: 12px;
+    border-radius: 12px;
     z-index: 10;
   }
   #news-item {
-    display: block;
-    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
     color: #cfd6e4;
     text-decoration: none;
-    line-height: 1.5;
     transition: opacity 0.4s ease;
   }
-  #news-item:hover, #news-item:active { color: #d9b96a; }
-  .news-date { color: #d9b96a; font-size: 11px; margin-right: 8px; }
-  #app.minimal #news-ticker { display: none; }
+  #news-item:hover #news-title, #news-item:active #news-title { color: #d9b96a; }
+  .news-body { flex: 1; min-width: 0; }
+  .news-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; margin-bottom: 2px; }
+  #news-badge {
+    background: #b83232;
+    color: #fff;
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 10px;
+    font-weight: 600;
+    flex: none;
+  }
+  #news-date { color: #d9b96a; }
+  #news-title {
+    font-size: 12.5px;
+    line-height: 1.45;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  #news-thumb {
+    width: 56px;
+    height: 56px;
+    border-radius: 10px;
+    object-fit: cover;
+    flex: none;
+    background: rgba(255, 255, 255, 0.06);
+  }
+  #app.minimal #news-card { display: none; }
 
   /* ============ 操作ボタンエリア（動作はSTEP 5で実装） ============ */
   #buttons {
     display: grid;
     grid-template-columns: repeat(5, 1fr);
     gap: 8px;
-    padding: 0 16px calc(14px + env(safe-area-inset-bottom));
+    padding: 0 14px calc(12px + env(safe-area-inset-bottom));
     z-index: 10;
   }
-  /* 文言短縮に合わせタップ領域拡大・視認性UP（UI改善指示書⑤） */
+  /* 文言短縮に合わせタップ領域を確保しつつ軽量な見た目に */
   #buttons button {
     appearance: none;
     border: 1px solid rgba(200, 170, 100, 0.25);
     background: rgba(16, 24, 44, 0.8);
     color: #e8ecf4;
     border-radius: 12px;
-    padding: 13px 2px;
-    font-size: 12.5px;
+    padding: 11px 2px;
+    font-size: 12px;
     font-family: inherit;
     cursor: pointer;
   }
@@ -239,16 +268,13 @@
       <span id="place-name">--</span>
       <span id="weather-detail">-- / 降水 --%</span>
     </div>
-    <div>
+    <div id="metrics-line">
       <span id="temp-main">--℃</span>
-      <span id="feels-like" style="opacity:.75; font-size:13px;"> 体感 --℃</span>
-    </div>
-    <div id="humidity-wind" style="opacity:.85;">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3c3.5 4.5 6 7.7 6 11a6 6 0 0 1-12 0c0-3.3 2.5-6.5 6-11z"/></svg>
-      <span>湿度 <span id="humidity-val">--%</span></span>
+      <span class="sub" id="feels-like">体感 --℃</span>
       <span class="sep">｜</span>
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 8h8a2.5 2.5 0 1 0-2.5-2.5M4 12h12a2.5 2.5 0 1 1-2.5 2.5M4 16h6"/></svg>
-      <span>風速 <span id="wind-val">--m/s</span></span>
+      <span class="sub">湿度 <span id="humidity-val">--%</span></span>
+      <span class="sep">｜</span>
+      <span class="sub">風速 <span id="wind-val">--m/s</span></span>
     </div>
     <div id="storm-line">
       <span id="storm-name">Storm: --</span>
@@ -257,8 +283,19 @@
     <div id="pattern-desc"></div>
   </section>
 
-  <!-- グルメニュース（拡張機能。1件ずつローテーション表示・取得失敗時は非表示のまま） -->
-  <div id="news-ticker" class="hidden"><a id="news-item" target="_blank" rel="noopener"></a></div>
+  <!-- グルメニュースカード（拡張機能。サムネ付き・取得失敗時は非表示のまま） -->
+  <div id="news-card" class="hidden">
+    <a id="news-item" target="_blank" rel="noopener">
+      <span class="news-body">
+        <span class="news-meta">
+          <span id="news-badge" class="hidden">新着</span>
+          <span id="news-date"></span>
+        </span>
+        <span id="news-title"></span>
+      </span>
+      <img id="news-thumb" alt="" loading="lazy" hidden onerror="this.hidden=true">
+    </a>
+  </div>
 
   <!-- 操作ボタン5つ（文言はUI改善指示書⑤で短縮） -->
   <nav id="buttons">
@@ -290,7 +327,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.14";
+const APP_VERSION = "v0.15";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -409,11 +446,14 @@ const CONFIG = {
   // 取得失敗・サービス停止時はティッカーを非表示にして本体は影響を受けない
   NEWS: {
     ENABLED: true,
-    FEED_URL: "https://gourmet.watch.impress.co.jp/data/rss/1.0/grw/feed.rdf", // グルメWatch
+    // ロケットニュース24 グルメカテゴリ（全記事にサムネイル画像あり）。
+    // 旧: グルメWatch https://gourmet.watch.impress.co.jp/data/rss/1.0/grw/feed.rdf（画像なし）
+    FEED_URL: "https://rocketnews24.com/category/グルメ/feed/",
     CONVERTER: "https://api.rss2json.com/v1/api.json?rss_url=",
     UPDATE_INTERVAL_MIN: 30, // ニュースの自動更新間隔（分）
     MAX_ITEMS: 8,            // ローテーションする最大件数
     ROTATE_SEC: 8,           // 1件あたりの表示秒数（1件ずつ順に切替）
+    FRESH_HOURS: 24,         // この時間以内の記事に「新着」バッジを付ける
   },
 };
 
@@ -603,6 +643,7 @@ async function fetchGourmetNews() {
         title: (item.title || "").trim(),
         link: (item.link || "").trim(),
         pubDate: (item.pubDate || "").trim(),
+        thumbnail: (item.thumbnail || (item.enclosure && item.enclosure.link) || "").trim(),
       }))
       .filter((item) => item.title);
     newsIndex = 0;
@@ -1269,7 +1310,7 @@ function updateOverlay() {
   document.getElementById("place-name").textContent = w.place;
   document.getElementById("weather-detail").textContent = `${disp.label} / 降水 ${precipText}`;
   document.getElementById("temp-main").textContent = `${Math.round(w.temperature)}℃`;
-  document.getElementById("feels-like").textContent = ` 体感 ${Math.round(w.apparentTemp)}℃`;
+  document.getElementById("feels-like").textContent = `体感 ${Math.round(w.apparentTemp)}℃`;
   document.getElementById("humidity-val").textContent = `${w.humidity}%`;
   document.getElementById("wind-val").textContent = `${Number(w.windSpeed).toFixed(1)}m/s`;
   const iconEl = document.getElementById("weather-icon");
@@ -1285,42 +1326,57 @@ function updateOverlay() {
   updateBackground(); // 天気が変われば背景も追従（シーン未構築時は内部でスキップ）
 }
 
-/** 記事の日付表示（例: 7/8(水)）。不正な日付は空文字 */
-function newsDateLabel(pubDate) {
+/**
+ * rss2jsonの日付をDateにする。"YYYY-MM-DD HH:MM:SS"（UTC・時差表記なし）のため
+ * UTCとして解釈する（現地時間扱いだと日本では9時間ズレて前日表示になる）
+ */
+function parseNewsDate(pubDate) {
   let s = (pubDate || "").trim();
-  // rss2jsonの日付は "YYYY-MM-DD HH:MM:SS"（UTC・時差表記なし）のためUTCとして解釈する。
-  // 現地時間として解釈すると日本では9時間ズレて深夜〜朝の記事が前日表示になる
   if (s && !s.includes("T")) s = s.replace(" ", "T") + "Z";
   const d = new Date(s);
-  if (isNaN(d.getTime())) return "";
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/** 記事の日付表示（例: 7/8(水)）。不正な日付は空文字 */
+function newsDateLabel(pubDate) {
+  const d = parseNewsDate(pubDate);
+  if (!d) return "";
   const wd = ["日", "月", "火", "水", "木", "金", "土"][d.getDay()];
   return `${d.getMonth() + 1}/${d.getDate()}(${wd})`;
 }
 
+/** FRESH_HOURS以内の記事なら「新着」バッジ対象 */
+function isFreshNews(pubDate) {
+  const d = parseNewsDate(pubDate);
+  return !!d && (Date.now() - d.getTime()) < CONFIG.NEWS.FRESH_HOURS * 3600 * 1000;
+}
+
 /**
- * ニュースを1件ずつ表示する（タイトル全文＋記事日付・タップで記事へ）。
+ * ニュースカードを1件ずつ表示する（新着バッジ＋日付＋タイトル2行＋サムネ・タップで記事へ）。
  * 切替はフェード。外部由来テキストはtextContentで挿入（XSS対策）
  */
 function renderNewsItem() {
-  const ticker = document.getElementById("news-ticker");
+  const card = document.getElementById("news-card");
   const el = document.getElementById("news-item");
   if (newsItems.length === 0) {
-    ticker.classList.add("hidden");
+    card.classList.add("hidden");
     return;
   }
-  ticker.classList.remove("hidden");
+  card.classList.remove("hidden");
   const item = newsItems[newsIndex % newsItems.length];
   el.style.opacity = "0";
   setTimeout(() => {
-    el.textContent = "";
-    const date = newsDateLabel(item.pubDate);
-    if (date) {
-      const span = document.createElement("span");
-      span.className = "news-date";
-      span.textContent = date;
-      el.appendChild(span);
+    document.getElementById("news-date").textContent = newsDateLabel(item.pubDate);
+    document.getElementById("news-badge").classList.toggle("hidden", !isFreshNews(item.pubDate));
+    document.getElementById("news-title").textContent = item.title;
+    const thumb = document.getElementById("news-thumb");
+    if (/^https?:\/\//.test(item.thumbnail)) {
+      thumb.hidden = false;
+      thumb.src = item.thumbnail;
+    } else {
+      thumb.hidden = true;
+      thumb.removeAttribute("src");
     }
-    el.appendChild(document.createTextNode(item.title));
     if (/^https?:\/\//.test(item.link)) {
       el.href = item.link;
     } else {
