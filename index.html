@@ -329,7 +329,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.17";
+const APP_VERSION = "v0.18";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -356,7 +356,7 @@ const CONFIG = {
     { name: "onion",   label: "玉ねぎ",   color: 0xe8cf9a, size: 0.11,  maxCount: 60 },
     { name: "drop",    label: "つゆ滴",   color: 0xc9862e, size: 0.05,  maxCount: 80, float: false },
     { name: "ginger",  label: "紅しょうが", color: 0xd94f4f, size: 0.06, maxCount: 30 },
-    { name: "sparkle", label: "光の粒",   color: 0xffe9b0, size: 0.03,  maxCount: 100 },
+    { name: "sparkle", label: "光の粒",   color: 0xffe9b0, size: 0.03,  maxCount: 100, float: false },
   ],
 
   // 気温→米量（設計書4-3）。[気温℃, riceAmount] の配列。間は線形補間、範囲外は端の値。
@@ -794,6 +794,61 @@ let bowlGroup, eggMesh;
 const EGG_MATERIALS = {};
 /** 読込済み3Dモデル {bowl, mound, meat, onion}。読込失敗時はnull＝プリミティブ表示 */
 let loadedModels = null;
+/** 加工済みの肉ジオメトリ（皺＋厚み。盛り付けと浮遊の両方で共用） */
+let meatGeomProcessed = null;
+/** 盛りの上のトッピング（肉・玉ねぎ）。updateToppings()が天気に応じて表示数を制御 */
+let toppingMeats = [];
+let toppingOnions = [];
+
+/**
+ * 肉ジオメトリを加工する: くちゃくちゃの皺（多周波の変位）＋厚み
+ * （皺を付けた面を法線方向に±半分ずらした2枚に複製して結合し、板に厚みを持たせる）
+ */
+function makeCrumpledMeatGeometry(srcGeom) {
+  const g = srcGeom.clone();
+  const pos = g.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
+    pos.setX(i, x + Math.sin(z * 9 + 2) * 0.05);
+    pos.setZ(i, z + Math.cos(x * 8 + 4) * 0.05);
+    pos.setY(i, pos.getY(i)
+      + Math.sin(x * 7) * 0.10
+      + Math.cos(z * 6 + 1.3) * 0.09
+      + Math.sin((x + z) * 14) * 0.045);
+  }
+  g.computeVertexNormals();
+
+  const t = 0.05; // 厚み（元寸法基準。浮遊時はスケール0.55で約0.03）
+  const n = g.attributes.normal;
+  const uv = g.attributes.uv;
+  const idx = g.index.array;
+  const vc = pos.count;
+  const p2 = new Float32Array(vc * 2 * 3);
+  const uv2 = new Float32Array(vc * 2 * 2);
+  for (let i = 0; i < vc; i++) {
+    for (const [side, off] of [[0, t / 2], [1, -t / 2]]) {
+      p2[(side * vc + i) * 3]     = pos.getX(i) + n.getX(i) * off;
+      p2[(side * vc + i) * 3 + 1] = pos.getY(i) + n.getY(i) * off;
+      p2[(side * vc + i) * 3 + 2] = pos.getZ(i) + n.getZ(i) * off;
+      uv2[(side * vc + i) * 2]     = uv.getX(i);
+      uv2[(side * vc + i) * 2 + 1] = uv.getY(i);
+    }
+  }
+  const i2 = new Uint32Array(idx.length * 2);
+  i2.set(idx, 0);
+  for (let i = 0; i < idx.length; i += 3) { // 下面は巻き順を反転
+    i2[idx.length + i]     = idx[i] + vc;
+    i2[idx.length + i + 1] = idx[i + 2] + vc;
+    i2[idx.length + i + 2] = idx[i + 1] + vc;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute("position", new THREE.BufferAttribute(p2, 3));
+  out.setAttribute("uv", new THREE.BufferAttribute(uv2, 2));
+  out.setIndex(new THREE.BufferAttribute(i2, 1));
+  out.computeVertexNormals();
+  return out;
+}
 
 /** GLBを読み込みシーン（THREE.Group）を返す */
 function loadGlb(url) {
@@ -876,6 +931,13 @@ function initScene() {
   rimLight.position.set(-2, 3, -3);
   scene.add(rimLight);
 
+  // 肉ジオメトリを一度だけ加工（皺＋厚み）。盛り付け・浮遊の両方で共用する
+  meatGeomProcessed = null;
+  if (loadedModels && loadedModels.meat) {
+    const src = findFirstMesh(loadedModels.meat);
+    if (src) meatGeomProcessed = makeCrumpledMeatGeometry(src.geometry);
+  }
+
   buildBowl(lowSpec);
   buildIngredients(lowSpec);
   buildBackgroundEffects(lowSpec);
@@ -949,48 +1011,63 @@ function buildBowl(lowSpec) {
     moundY = (r) => 0.5 + 0.475 * Math.sqrt(Math.max(0, 1 - (r / 0.95) ** 2));
   }
 
-  // 盛りの上の牛肉・玉ねぎ（静的トッピング）: モデルがあればクローン、なければプリミティブ
+  // 盛りの上のトッピング（肉16枚・玉ねぎ10枚を生成し、表示数はupdateToppings()が天気で制御）
+  // 前半の肉はリング状、後半は中央に積み上げ＝肉多めの日は山盛りになる
   const meatSrc = useModels && loadedModels.meat ? findFirstMesh(loadedModels.meat) : null;
   const onionSrc = useModels && loadedModels.onion ? findFirstMesh(loadedModels.onion) : null;
-  const meatMat = meatSrc ? null : new THREE.MeshStandardMaterial({ color: 0x7a4a28, roughness: 0.6, flatShading: true });
+  const meatMat = meatSrc
+    ? meatSrc.material
+    : new THREE.MeshStandardMaterial({ color: 0x7a4a28, roughness: 0.6, flatShading: true });
   const onionMat = onionSrc ? null : new THREE.MeshStandardMaterial({ color: 0xe8cf9a, roughness: 0.7, transparent: true, opacity: 0.92 });
 
-  for (let i = 0; i < 9; i++) {
-    const a = (i / 9) * Math.PI * 2 + 0.4;
-    const r = 0.38 + (i % 3) * 0.16;
+  toppingMeats = [];
+  toppingOnions = [];
+  for (let i = 0; i < 16; i++) {
     let piece;
-    if (meatSrc) {
-      piece = meatSrc.clone();
-      piece.scale.setScalar(0.5);
-      piece.rotation.set(0.25 * Math.sin(i * 7), a, 0.15 * Math.cos(i * 5));
+    if (meatGeomProcessed) {
+      piece = new THREE.Mesh(meatGeomProcessed, meatMat);
+      piece.scale.setScalar(0.68);
     } else {
       piece = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.05, 0.22), meatMat);
-      piece.rotation.set(0.3 * Math.sin(i * 7), a, 0.2 * Math.cos(i * 5));
     }
-    const px = Math.cos(a) * r;
-    const pz = Math.sin(a) * r;
-    piece.position.set(px, moundY(r, px, pz) + 0.02, pz);
+    let px, pz, lift;
+    if (i < 10) {
+      const a = (i / 10) * Math.PI * 2 + 0.4;
+      const r = 0.3 + (i % 3) * 0.17;
+      px = Math.cos(a) * r;
+      pz = Math.sin(a) * r;
+      lift = 0.02;
+    } else {
+      const a = ((i - 10) / 6) * Math.PI * 2 + 1.1;
+      const r = 0.12 + ((i - 10) % 2) * 0.12;
+      px = Math.cos(a) * r;
+      pz = Math.sin(a) * r;
+      lift = 0.05 + (i - 10) * 0.02; // 中央に積み上げ（山盛り）
+    }
+    piece.rotation.set(0.25 * Math.sin(i * 7), (i / 16) * Math.PI * 2, 0.15 * Math.cos(i * 5));
+    piece.position.set(px, moundY(Math.hypot(px, pz), px, pz) + lift, pz);
     bowlGroup.add(piece);
+    toppingMeats.push(piece);
   }
-  for (let i = 0; i < 5; i++) {
-    const a = (i / 5) * Math.PI * 2;
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2 + 0.7;
+    const r = 0.36 + (i % 3) * 0.13;
     let strip;
     if (onionSrc) {
       strip = onionSrc.clone();
       strip.scale.setScalar(0.7);
       strip.rotation.set(0.15 * Math.sin(i * 3), a, 0);
-      const px = Math.cos(a) * 0.55;
-      const pz = Math.sin(a) * 0.55;
-      strip.position.set(px, moundY(0.55, px, pz) + 0.02, pz);
     } else {
       strip = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.025, 6, 10, Math.PI * 1.2), onionMat);
       strip.rotation.set(Math.PI / 2 + 0.4 * Math.sin(i * 3), 0, a);
-      const px = Math.cos(a) * 0.6;
-      const pz = Math.sin(a) * 0.6;
-      strip.position.set(px, moundY(0.6, px, pz) + 0.02, pz);
     }
+    const px = Math.cos(a) * r;
+    const pz = Math.sin(a) * r;
+    strip.position.set(px, moundY(r, px, pz) + 0.02, pz);
     bowlGroup.add(strip);
+    toppingOnions.push(strip);
   }
+  updateToppings();
 
   // 卵（丼の中央＝盛りの頂上。toggleEgg()がマテイリアルを差し替える）
   const eggWhite = new THREE.Mesh(
@@ -1030,17 +1107,10 @@ function buildIngredients(lowSpec) {
       (ing.name === "meat" ? loadedModels.meat : ing.name === "onion" ? loadedModels.onion : null);
     const srcMesh = srcGroup ? findFirstMesh(srcGroup) : null;
     if (srcMesh) {
-      geom = srcMesh.geometry.clone();
-      if (ing.name === "meat") {
-        // ペラペラの平面に波状の歪みをベイク（ひらひらした肉片に）
-        const pos = geom.attributes.position;
-        for (let vi = 0; vi < pos.count; vi++) {
-          const x = pos.getX(vi);
-          const z = pos.getZ(vi);
-          pos.setY(vi, pos.getY(vi) + Math.sin(x * 6.5) * 0.06 + Math.cos(z * 5 + 1.3) * 0.05);
-        }
-        geom.computeVertexNormals();
-      }
+      // 肉は加工済みジオメトリ（皺＋厚み）を使用
+      geom = (ing.name === "meat" && meatGeomProcessed)
+        ? meatGeomProcessed.clone()
+        : srcMesh.geometry.clone();
       const s = INGREDIENT_MODEL_SCALE[ing.name] || 1;
       geom.scale(s, s, s);
       modelMat = srcMesh.material;
@@ -1267,6 +1337,7 @@ function updateEffects() {
     steam.visible = bowlParams.steam > 0.15;
     steam.material.opacity = bowlParams.steam * 0.4;
   }
+  updateToppings(); // 盛り付けの量も天気（bowlParams）に追従
 }
 
 /** 具材種別→表示数の割合（0〜1）。天気取得前は表示しない */
@@ -1280,8 +1351,30 @@ function countFraction(ing) {
   else if (name === "meat") frac = bowlParams.meatAmount;
   else if (name === "sparkle") frac = (pat === "澄み型") ? 0.5 : 0.3;
   else frac = bowlParams.meatAmount * 0.8; // 玉ねぎ・紅しょうが・追加具材
+  if (name === "onion" && weatherState && wmoToCategory(weatherState.code) === "rain") {
+    frac *= 2.2; // 雨の日はねぎだく
+  }
   if (pat === "澄み型" && name !== "sparkle") frac *= 0.1; // 澄み型は少数が漂うのみ
   return Math.min(1, frac);
+}
+
+/**
+ * 盛りの上のトッピング表示数を天気に合わせて更新する。
+ * 最低限（肉6枚・玉ねぎ4枚）は常に表示し「たれごはん丸出し」を防ぐ。
+ * 肉の量が多い日（雷雨=1.0等）は中央の積み上げ分まで表示され山盛りになる。
+ * 雨の日は玉ねぎを全載せ（ねぎだく）
+ */
+function updateToppings() {
+  if (toppingMeats.length === 0) return;
+  const m = bowlParams.meatAmount;
+  const meatN = 6 + Math.round((toppingMeats.length - 6) * Math.max(0, (m - 0.4) / 0.6));
+  toppingMeats.forEach((p, i) => { p.visible = i < meatN; });
+
+  const rain = weatherState && wmoToCategory(weatherState.code) === "rain";
+  const onionN = rain
+    ? toppingOnions.length
+    : 4 + Math.round((toppingOnions.length - 4) * m * 0.5);
+  toppingOnions.forEach((p, i) => { p.visible = i < onionN; });
 }
 
 /**
