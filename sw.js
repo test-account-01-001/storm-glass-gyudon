@@ -11,7 +11,7 @@
  *   - 天気API（Open-Meteo）: ネット優先 → 失敗時キャッシュ（オフラインで前回値を表示）
  */
 
-const CACHE_VERSION = "v0.16-1";
+const CACHE_VERSION = "v0.17-1";
 const CACHE_NAME = `storm-gyudon-${CACHE_VERSION}`;
 
 const THREE_CDN = "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js";
