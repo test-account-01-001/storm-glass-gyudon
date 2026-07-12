@@ -329,7 +329,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.16";
+const APP_VERSION = "v0.17";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -350,10 +350,11 @@ const CONFIG = {
   // 具材の種類・色・サイズ・最大数（設計書4-5 / UI指示書B）
   // 1項目追加すると自動でInstancedMeshが生成される設計（STEP 3で実装）
   INGREDIENTS: [
-    { name: "rice",    label: "米粒",     color: 0xf7f3e9, size: 0.045, maxCount: RICE_MAX_COUNT },
+    // float:false = 浮遊させない（ユーザー指示 v0.17: 米粒・つゆ滴は見た目が汚いため全パターンで停止）
+    { name: "rice",    label: "米粒",     color: 0xf7f3e9, size: 0.045, maxCount: RICE_MAX_COUNT, float: false },
     { name: "meat",    label: "牛肉片",   color: 0x8a5a33, size: 0.13,  maxCount: MEAT_MAX_COUNT },
     { name: "onion",   label: "玉ねぎ",   color: 0xe8cf9a, size: 0.11,  maxCount: 60 },
-    { name: "drop",    label: "つゆ滴",   color: 0xc9862e, size: 0.05,  maxCount: 80 },
+    { name: "drop",    label: "つゆ滴",   color: 0xc9862e, size: 0.05,  maxCount: 80, float: false },
     { name: "ginger",  label: "紅しょうが", color: 0xd94f4f, size: 0.06, maxCount: 30 },
     { name: "sparkle", label: "光の粒",   color: 0xffe9b0, size: 0.03,  maxCount: 100 },
   ],
@@ -1014,12 +1015,14 @@ function buildBowl(lowSpec) {
 }
 
 /** 浮遊具材にモデルを使う際のスケール（ジオメトリに焼き込む） */
-const INGREDIENT_MODEL_SCALE = { meat: 0.3, onion: 0.5 };
+const INGREDIENT_MODEL_SCALE = { meat: 0.55, onion: 0.5 };
 
 /** CONFIG.INGREDIENTSから具材InstancedMeshを自動生成（1項目追加で自動対応） */
 function buildIngredients(lowSpec) {
   const detail = lowSpec ? 0.5 : 1;
   for (const ing of CONFIG.INGREDIENTS) {
+    if (ing.float === false) continue; // 浮遊しない具材はInstancedMesh自体を作らない
+
     // 肉・玉ねぎはモデルのジオメトリ＋テクスチャを使用（なければプリミティブ）
     let geom = null;
     let modelMat = null;
@@ -1028,6 +1031,16 @@ function buildIngredients(lowSpec) {
     const srcMesh = srcGroup ? findFirstMesh(srcGroup) : null;
     if (srcMesh) {
       geom = srcMesh.geometry.clone();
+      if (ing.name === "meat") {
+        // ペラペラの平面に波状の歪みをベイク（ひらひらした肉片に）
+        const pos = geom.attributes.position;
+        for (let vi = 0; vi < pos.count; vi++) {
+          const x = pos.getX(vi);
+          const z = pos.getZ(vi);
+          pos.setY(vi, pos.getY(vi) + Math.sin(x * 6.5) * 0.06 + Math.cos(z * 5 + 1.3) * 0.05);
+        }
+        geom.computeVertexNormals();
+      }
       const s = INGREDIENT_MODEL_SCALE[ing.name] || 1;
       geom.scale(s, s, s);
       modelMat = srcMesh.material;
@@ -1067,6 +1080,14 @@ function buildIngredients(lowSpec) {
     }
     mesh.userData.seeds = seeds;
     mesh.userData.pos = pos;
+    // 肉は1枚ごとにランダムな非均一スケール（±25%）で形の個体差を出す
+    if (ing.name === "meat") {
+      const jitter = new Float32Array(ing.maxCount * 3);
+      for (let i = 0; i < ing.maxCount * 3; i++) {
+        jitter[i] = 0.8 + Math.random() * 0.5;
+      }
+      mesh.userData.scaleJitter = jitter;
+    }
     scene.add(mesh);
     ingredientMeshes[ing.name] = mesh;
   }
@@ -1249,14 +1270,16 @@ function updateEffects() {
 }
 
 /** 具材種別→表示数の割合（0〜1）。天気取得前は表示しない */
-function countFraction(name) {
+function countFraction(ing) {
   if (!weatherState) return 0;
+  if (ing.float === false) return 0; // 浮遊停止指定（米粒・つゆ滴）
+  const name = ing.name;
   const pat = appState.pattern;
   let frac;
   if (name === "rice") frac = bowlParams.riceAmount;
   else if (name === "meat") frac = bowlParams.meatAmount;
   else if (name === "sparkle") frac = (pat === "澄み型") ? 0.5 : 0.3;
-  else frac = bowlParams.meatAmount * 0.8; // 玉ねぎ・つゆ滴・紅しょうが・追加具材
+  else frac = bowlParams.meatAmount * 0.8; // 玉ねぎ・紅しょうが・追加具材
   if (pat === "澄み型" && name !== "sparkle") frac *= 0.1; // 澄み型は少数が漂うのみ
   return Math.min(1, frac);
 }
@@ -1338,10 +1361,11 @@ function updateParticles(dt, t) {
   for (const ing of CONFIG.INGREDIENTS) {
     const mesh = ingredientMeshes[ing.name];
     if (!mesh) continue;
-    mesh.count = Math.round(countFraction(ing.name) * ing.maxCount);
+    mesh.count = Math.round(countFraction(ing) * ing.maxCount);
     if (mesh.count === 0) continue;
     const seeds = mesh.userData.seeds;
     const pos = mesh.userData.pos;
+    const jitter = mesh.userData.scaleJitter || null;
     for (let i = 0; i < mesh.count; i++) {
       computePatternTarget(appState.pattern, seeds[i], i, t, TMP_POS);
       const j = i * 3;
@@ -1354,6 +1378,11 @@ function updateParticles(dt, t) {
       }
       particleDummy.position.set(pos[j], pos[j + 1], pos[j + 2]);
       particleDummy.rotation.set(t * (0.3 + seeds[i].r3), t * 0.5 * seeds[i].r4, 0);
+      if (jitter) {
+        particleDummy.scale.set(jitter[j], jitter[j + 1], jitter[j + 2]);
+      } else {
+        particleDummy.scale.set(1, 1, 1); // dummyは使い回すため必ずリセット
+      }
       particleDummy.updateMatrix();
       mesh.setMatrixAt(i, particleDummy.matrix);
     }
