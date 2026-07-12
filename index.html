@@ -320,6 +320,8 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- GLTFLoader r128（cdnjsはexamples配下を配信していないためjsDelivrのthree公式npmミラーを使用） -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script>
 "use strict";
 
@@ -327,7 +329,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.15";
+const APP_VERSION = "v0.16";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -454,6 +456,16 @@ const CONFIG = {
     MAX_ITEMS: 8,            // ローテーションする最大件数
     ROTATE_SEC: 8,           // 1件あたりの表示秒数（1件ずつ順に切替）
     FRESH_HOURS: 24,         // この時間以内の記事に「新着」バッジを付ける
+  },
+
+  // 3Dモデル（ユーザー支給GLB・テクスチャ埋め込み済み）。
+  // 読込失敗時・ENABLED:false時はプリミティブ表示に自動フォールバックする
+  MODELS: {
+    ENABLED: true,
+    BOWL:  "assets/models/gyudon_utuwa.glb",    // 器（縁がy=0・半径1）
+    MOUND: "assets/models/gyudon_kome.glb",     // 米の盛り（ノーマルマップ入り）
+    MEAT:  "assets/models/gyudon_niku.glb",     // 肉片（板ポリ）
+    ONION: "assets/models/gyudon_tamanegi.glb", // 玉ねぎ片
   },
 };
 
@@ -779,6 +791,47 @@ let scene, camera, renderer;
 let bowlGroup, eggMesh;
 /** 卵のマテリアル（生=光沢オレンジ／温玉=白濁。buildBowl()で生成） */
 const EGG_MATERIALS = {};
+/** 読込済み3Dモデル {bowl, mound, meat, onion}。読込失敗時はnull＝プリミティブ表示 */
+let loadedModels = null;
+
+/** GLBを読み込みシーン（THREE.Group）を返す */
+function loadGlb(url) {
+  return new Promise((resolve, reject) => {
+    new THREE.GLTFLoader().load(url, (gltf) => resolve(gltf.scene), undefined, reject);
+  });
+}
+
+/** グループ内の最初のMeshを返す（GLBからジオメトリ・マテリアルを取り出す用） */
+function findFirstMesh(root) {
+  let found = null;
+  root.traverse((o) => { if (!found && o.isMesh) found = o; });
+  return found;
+}
+
+/** 3Dモデル一式を読み込む。失敗時はnull（呼び出し側でプリミティブにフォールバック） */
+async function loadModels() {
+  if (!CONFIG.MODELS.ENABLED) return null;
+  if (typeof THREE === "undefined" || !THREE.GLTFLoader) {
+    console.warn("GLTFLoader未読込のためプリミティブ表示で継続します");
+    return null;
+  }
+  try {
+    const [bowl, mound, meat, onion] = await Promise.all([
+      loadGlb(CONFIG.MODELS.BOWL),
+      loadGlb(CONFIG.MODELS.MOUND),
+      loadGlb(CONFIG.MODELS.MEAT),
+      loadGlb(CONFIG.MODELS.ONION),
+    ]);
+    // 板ポリの肉・玉ねぎが裏面から見ると消えるため、全モデルを両面描画に
+    for (const g of [bowl, mound, meat, onion]) {
+      g.traverse((o) => { if (o.isMesh) o.material.side = THREE.DoubleSide; });
+    }
+    return { bowl, mound, meat, onion };
+  } catch (err) {
+    console.warn("3Dモデルの読込に失敗（プリミティブ表示で継続）:", err.message);
+    return null;
+  }
+}
 /** 具材種別ごとのInstancedMesh辞書 {rice, meat, onion, drop, ginger, sparkle} */
 let ingredientMeshes = {};
 /** 背景の天候パーティクル・星 */
@@ -835,50 +888,106 @@ function initScene() {
 function buildBowl(lowSpec) {
   bowlGroup = new THREE.Group();
   const seg = lowSpec ? 24 : 48;
+  const useModels = !!(loadedModels && loadedModels.bowl && loadedModels.mound);
 
-  // 丼本体（LatheGeometry。輪郭点を変えると器の形が変わる）
-  const profile = [
-    new THREE.Vector2(0.0, 0.02),
-    new THREE.Vector2(0.38, 0.03),
-    new THREE.Vector2(0.42, 0.10),
-    new THREE.Vector2(0.60, 0.18),
-    new THREE.Vector2(0.90, 0.44),
-    new THREE.Vector2(1.05, 0.62),
-  ];
-  const bowlMesh = new THREE.Mesh(
-    new THREE.LatheGeometry(profile, seg),
-    new THREE.MeshStandardMaterial({ color: 0x2e3140, roughness: 0.35, metalness: 0.1, side: THREE.DoubleSide })
-  );
-  bowlGroup.add(bowlMesh);
+  /** 盛り曲面上の高さ（中心からの水平距離r → 表面y）。トッピングを埋没させないため */
+  let moundY;
 
-  // 盛り（米のマウンド）: 中心y=0.5・半径(0.95, 0.475, 0.95)の半楕円体
-  const mound = new THREE.Mesh(
-    new THREE.SphereGeometry(0.95, lowSpec ? 16 : 28, lowSpec ? 10 : 18, 0, Math.PI * 2, 0, Math.PI / 2),
-    new THREE.MeshStandardMaterial({ color: 0xeee3cc, roughness: 1.0 })
-  );
-  mound.scale.set(1, 0.5, 1);
-  mound.position.y = 0.5;
-  bowlGroup.add(mound);
+  if (useModels) {
+    // 器モデル: 縁がy=0・半径1の座標系 → 従来の構図（縁y≈0.62・半径≈1.05）へ合わせる
+    const bowl = loadedModels.bowl;
+    bowl.scale.setScalar(1.05);
+    bowl.position.y = 0.62;
+    bowlGroup.add(bowl);
 
-  // 盛り曲面上の高さ（中心からの水平距離r → 表面y）。トッピングを埋没させないため
-  const moundY = (r) => 0.5 + 0.475 * Math.sqrt(Math.max(0, 1 - (r / 0.95) ** 2));
+    // 盛りモデル: 半径0.9・高さ0.455（ノーマルマップ入り）→ 器の縁の内側に載せる
+    const mound = loadedModels.mound;
+    mound.scale.setScalar(1.05);
+    mound.position.y = 0.6;
+    bowlGroup.add(mound);
 
-  // 盛りの上の牛肉・玉ねぎ（静的トッピング）
-  const meatMat = new THREE.MeshStandardMaterial({ color: 0x7a4a28, roughness: 0.6, flatShading: true });
-  const onionMat = new THREE.MeshStandardMaterial({ color: 0xe8cf9a, roughness: 0.7, transparent: true, opacity: 0.92 });
+    // 盛りモデルの実形状に合わせ、真上からのレイキャストで表面高さを取得する
+    // （解析式だと実際の盛りの膨らみとズレてトッピングが埋まる）
+    mound.updateMatrixWorld(true);
+    const ray = new THREE.Raycaster();
+    const DOWN = new THREE.Vector3(0, -1, 0);
+    const H = 0.455 * 1.05;
+    const R = 0.9 * 1.05;
+    const analytic = (r) => 0.6 + H * Math.sqrt(Math.max(0, 1 - (r / R) ** 2));
+    moundY = (r, x, z) => {
+      const px = (x !== undefined) ? x : r;
+      const pz = (z !== undefined) ? z : 0;
+      ray.set(new THREE.Vector3(px, 3, pz), DOWN);
+      const hits = ray.intersectObject(mound, true);
+      return hits.length ? hits[0].point.y : analytic(r);
+    };
+  } else {
+    // フォールバック: プリミティブの丼（LatheGeometry）＋半楕円体の盛り
+    const profile = [
+      new THREE.Vector2(0.0, 0.02),
+      new THREE.Vector2(0.38, 0.03),
+      new THREE.Vector2(0.42, 0.10),
+      new THREE.Vector2(0.60, 0.18),
+      new THREE.Vector2(0.90, 0.44),
+      new THREE.Vector2(1.05, 0.62),
+    ];
+    const bowlMesh = new THREE.Mesh(
+      new THREE.LatheGeometry(profile, seg),
+      new THREE.MeshStandardMaterial({ color: 0x2e3140, roughness: 0.35, metalness: 0.1, side: THREE.DoubleSide })
+    );
+    bowlGroup.add(bowlMesh);
+
+    const mound = new THREE.Mesh(
+      new THREE.SphereGeometry(0.95, lowSpec ? 16 : 28, lowSpec ? 10 : 18, 0, Math.PI * 2, 0, Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0xeee3cc, roughness: 1.0 })
+    );
+    mound.scale.set(1, 0.5, 1);
+    mound.position.y = 0.5;
+    bowlGroup.add(mound);
+
+    moundY = (r) => 0.5 + 0.475 * Math.sqrt(Math.max(0, 1 - (r / 0.95) ** 2));
+  }
+
+  // 盛りの上の牛肉・玉ねぎ（静的トッピング）: モデルがあればクローン、なければプリミティブ
+  const meatSrc = useModels && loadedModels.meat ? findFirstMesh(loadedModels.meat) : null;
+  const onionSrc = useModels && loadedModels.onion ? findFirstMesh(loadedModels.onion) : null;
+  const meatMat = meatSrc ? null : new THREE.MeshStandardMaterial({ color: 0x7a4a28, roughness: 0.6, flatShading: true });
+  const onionMat = onionSrc ? null : new THREE.MeshStandardMaterial({ color: 0xe8cf9a, roughness: 0.7, transparent: true, opacity: 0.92 });
+
   for (let i = 0; i < 9; i++) {
     const a = (i / 9) * Math.PI * 2 + 0.4;
     const r = 0.38 + (i % 3) * 0.16;
-    const piece = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.05, 0.22), meatMat);
-    piece.position.set(Math.cos(a) * r, moundY(r) + 0.02, Math.sin(a) * r);
-    piece.rotation.set(0.3 * Math.sin(i * 7), a, 0.2 * Math.cos(i * 5));
+    let piece;
+    if (meatSrc) {
+      piece = meatSrc.clone();
+      piece.scale.setScalar(0.5);
+      piece.rotation.set(0.25 * Math.sin(i * 7), a, 0.15 * Math.cos(i * 5));
+    } else {
+      piece = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.05, 0.22), meatMat);
+      piece.rotation.set(0.3 * Math.sin(i * 7), a, 0.2 * Math.cos(i * 5));
+    }
+    const px = Math.cos(a) * r;
+    const pz = Math.sin(a) * r;
+    piece.position.set(px, moundY(r, px, pz) + 0.02, pz);
     bowlGroup.add(piece);
   }
   for (let i = 0; i < 5; i++) {
     const a = (i / 5) * Math.PI * 2;
-    const strip = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.025, 6, 10, Math.PI * 1.2), onionMat);
-    strip.position.set(Math.cos(a) * 0.6, moundY(0.6) + 0.02, Math.sin(a) * 0.6);
-    strip.rotation.set(Math.PI / 2 + 0.4 * Math.sin(i * 3), 0, a);
+    let strip;
+    if (onionSrc) {
+      strip = onionSrc.clone();
+      strip.scale.setScalar(0.7);
+      strip.rotation.set(0.15 * Math.sin(i * 3), a, 0);
+      const px = Math.cos(a) * 0.55;
+      const pz = Math.sin(a) * 0.55;
+      strip.position.set(px, moundY(0.55, px, pz) + 0.02, pz);
+    } else {
+      strip = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.025, 6, 10, Math.PI * 1.2), onionMat);
+      strip.rotation.set(Math.PI / 2 + 0.4 * Math.sin(i * 3), 0, a);
+      const px = Math.cos(a) * 0.6;
+      const pz = Math.sin(a) * 0.6;
+      strip.position.set(px, moundY(0.6, px, pz) + 0.02, pz);
+    }
     bowlGroup.add(strip);
   }
 
@@ -904,12 +1013,26 @@ function buildBowl(lowSpec) {
   scene.add(bowlGroup);
 }
 
+/** 浮遊具材にモデルを使う際のスケール（ジオメトリに焼き込む） */
+const INGREDIENT_MODEL_SCALE = { meat: 0.3, onion: 0.5 };
+
 /** CONFIG.INGREDIENTSから具材InstancedMeshを自動生成（1項目追加で自動対応） */
 function buildIngredients(lowSpec) {
   const detail = lowSpec ? 0.5 : 1;
   for (const ing of CONFIG.INGREDIENTS) {
-    let geom;
-    switch (ing.name) {
+    // 肉・玉ねぎはモデルのジオメトリ＋テクスチャを使用（なければプリミティブ）
+    let geom = null;
+    let modelMat = null;
+    const srcGroup = loadedModels &&
+      (ing.name === "meat" ? loadedModels.meat : ing.name === "onion" ? loadedModels.onion : null);
+    const srcMesh = srcGroup ? findFirstMesh(srcGroup) : null;
+    if (srcMesh) {
+      geom = srcMesh.geometry.clone();
+      const s = INGREDIENT_MODEL_SCALE[ing.name] || 1;
+      geom.scale(s, s, s);
+      modelMat = srcMesh.material;
+    }
+    if (!geom) switch (ing.name) {
       case "rice":
         geom = new THREE.SphereGeometry(ing.size, Math.max(4, 6 * detail), 4);
         geom.scale(1.6, 0.7, 0.7);
@@ -926,11 +1049,11 @@ function buildIngredients(lowSpec) {
       default: // drop / sparkle / 追加具材の既定形状
         geom = new THREE.SphereGeometry(ing.size, Math.max(4, 8 * detail), 6);
     }
-    const mat = (ing.name === "sparkle")
+    const mat = modelMat || ((ing.name === "sparkle")
       ? new THREE.MeshBasicMaterial({ color: ing.color, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false })
       : (ing.name === "drop")
         ? new THREE.MeshStandardMaterial({ color: ing.color, roughness: 0.15, metalness: 0.1 })
-        : new THREE.MeshStandardMaterial({ color: ing.color, roughness: 0.65, flatShading: true });
+        : new THREE.MeshStandardMaterial({ color: ing.color, roughness: 0.65, flatShading: true }));
     const mesh = new THREE.InstancedMesh(geom, mat, ing.maxCount);
     mesh.count = 0; // 表示数はupdateParticles()がcountで制御（maxCountは生成時固定）
     // パターン運動用の乱数シードと現在位置バッファ
@@ -1509,6 +1632,9 @@ function updateClock() {
  * ===================================================================== */
 
 async function init() {
+  // 3Dモデルの読込を最初に開始（位置情報・天気取得と並行で走らせる）
+  const modelsPromise = loadModels();
+
   // 保存済み設定（卵・待受モード）を最初に復元
   loadSettings();
   if (appState.minimalUI) {
@@ -1550,6 +1676,7 @@ async function init() {
   // WebGL非対応・CDN読込失敗でもUI（時計・天気情報）は生かしたまま案内を出す
   try {
     if (!window.THREE) throw new Error("Three.jsを読み込めませんでした");
+    loadedModels = await modelsPromise; // 失敗時はnull＝プリミティブ表示
     initScene();
     updateBackground();
     requestAnimationFrame(animate);
