@@ -11,10 +11,11 @@
  *   - 天気API（Open-Meteo）: ネット優先 → 失敗時キャッシュ（オフラインで前回値を表示）
  */
 
-const CACHE_VERSION = "v0.15-1";
+const CACHE_VERSION = "v0.16-1";
 const CACHE_NAME = `storm-gyudon-${CACHE_VERSION}`;
 
 const THREE_CDN = "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js";
+const GLTF_LOADER_CDN = "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js";
 
 const PRECACHE_URLS = [
   "./",
@@ -32,7 +33,12 @@ const PRECACHE_URLS = [
   "./assets/wx-rain.png",
   "./assets/wx-wind.png",
   "./assets/wx-snow.png",
+  "./assets/models/gyudon_utuwa.glb",
+  "./assets/models/gyudon_kome.glb",
+  "./assets/models/gyudon_niku.glb",
+  "./assets/models/gyudon_tamanegi.glb",
   THREE_CDN,
+  GLTF_LOADER_CDN,
 ];
 
 self.addEventListener("install", (event) => {
@@ -105,5 +111,7 @@ async function cacheFirst(request) {
 }
 
 function url_isCacheable(u) {
-  return u.startsWith(self.location.origin) || u.startsWith("https://cdnjs.cloudflare.com/");
+  return u.startsWith(self.location.origin)
+    || u.startsWith("https://cdnjs.cloudflare.com/")
+    || u.startsWith("https://cdn.jsdelivr.net/");
 }
