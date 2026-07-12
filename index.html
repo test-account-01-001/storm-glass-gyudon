@@ -320,8 +320,9 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<!-- GLTFLoader r128（cdnjsはexamples配下を配信していないためjsDelivrのthree公式npmミラーを使用） -->
+<!-- GLTFLoader/OrbitControls r128（cdnjsはexamples配下を配信していないためjsDelivrのthree公式npmミラーを使用） -->
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script>
 "use strict";
 
@@ -329,7 +330,7 @@
  * ① CONFIG … 全設定値（設計書8章。ここだけ触れば大半の調整が完了）
  * ===================================================================== */
 
-const APP_VERSION = "v0.18";
+const APP_VERSION = "v0.19";
 
 // 粒の最大数（重い端末は減らす）。InstancedMeshの最大数は生成時固定のため、
 // 変更後はページ再読み込みが必要（引き継ぎ仕様書10章）
@@ -449,15 +450,23 @@ const CONFIG = {
   // 取得失敗・サービス停止時はティッカーを非表示にして本体は影響を受けない
   NEWS: {
     ENABLED: true,
-    // ロケットニュース24 グルメカテゴリ（全記事にサムネイル画像あり）。
-    // 旧: グルメWatch https://gourmet.watch.impress.co.jp/data/rss/1.0/grw/feed.rdf（画像なし）
-    FEED_URL: "https://rocketnews24.com/category/グルメ/feed/",
+    // ロケットニュース24の食べ物・飲み物系4フィードを統合（全記事にサムネイルあり）。
+    // 他サイト（食楽web・macaroni・えん食べ等）はrss2json非対応のため見送り（2026-07-13検証）
+    FEEDS: [
+      "https://rocketnews24.com/category/グルメ/feed/",
+      "https://rocketnews24.com/tag/新商品/feed/",
+      "https://rocketnews24.com/tag/ドリンク/feed/",
+      "https://rocketnews24.com/tag/スイーツ/feed/",
+    ],
     CONVERTER: "https://api.rss2json.com/v1/api.json?rss_url=",
     UPDATE_INTERVAL_MIN: 30, // ニュースの自動更新間隔（分）
-    MAX_ITEMS: 8,            // ローテーションする最大件数
+    MAX_ITEMS: 12,           // ローテーションする最大件数（統合・重複除去後の新しい順）
     ROTATE_SEC: 8,           // 1件あたりの表示秒数（1件ずつ順に切替）
     FRESH_HOURS: 24,         // この時間以内の記事に「新着」バッジを付ける
   },
+
+  // 丼の自動回転速度（ラジアン/秒。約0.05=2分で1周。0で停止）
+  BOWL_ROTATE_SPEED: 0.05,
 
   // 3Dモデル（ユーザー支給GLB・テクスチャ埋め込み済み）。
   // 読込失敗時・ENABLED:false時はプリミティブ表示に自動フォールバックする
@@ -635,35 +644,60 @@ async function fetchPlaceName(lat, lon) {
  * グルメニュースの取得（拡張機能）。
  * 失敗しても致命的でないため静かに劣化させる（ティッカー非表示・再試行は次回定期更新任せ）
  */
+/**
+ * 1フィードを取得して整形済みitem配列を返す。
+ * rss2jsonは同一rss_urlの変換結果をしばらくキャッシュして古い記事を返すため、
+ * 15分ごとに変わるダミーパラメータ(_t)で回避する（毎回ユニークにはせず負荷を抑える）。
+ * cache:"no-store" はブラウザ側の30分HTTPキャッシュ（Cache-Control）対策
+ */
+async function fetchNewsFeed(feedBaseUrl) {
+  const bust = Math.floor(Date.now() / (15 * 60 * 1000));
+  const sep = feedBaseUrl.includes("?") ? "&" : "?";
+  const feedUrl = `${feedBaseUrl}${sep}_t=${bust}`;
+  const res = await fetch(CONFIG.NEWS.CONVERTER + encodeURIComponent(feedUrl), { cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.status !== "ok" || !Array.isArray(data.items)) {
+    throw new Error("RSS変換サービスの応答が不正");
+  }
+  return data.items
+    .map((item) => ({
+      title: (item.title || "").trim(),
+      link: (item.link || "").trim(),
+      pubDate: (item.pubDate || "").trim(),
+      thumbnail: (item.thumbnail || (item.enclosure && item.enclosure.link) || "").trim(),
+    }))
+    .filter((item) => item.title);
+}
+
+/** 全フィードを統合取得（一部失敗は無視）→ 重複除去 → 新しい順に最大MAX_ITEMS件 */
 async function fetchGourmetNews() {
   if (!CONFIG.NEWS.ENABLED) return;
   try {
-    // rss2jsonは同一rss_urlの変換結果をしばらくキャッシュして古い記事を返すため、
-    // 15分ごとに変わるダミーパラメータ(_t)で回避する（毎回ユニークにはせず負荷を抑える）。
-    // cache:"no-store" はブラウザ側の30分HTTPキャッシュ（Cache-Control）対策
-    const bust = Math.floor(Date.now() / (15 * 60 * 1000));
-    const sep = CONFIG.NEWS.FEED_URL.includes("?") ? "&" : "?";
-    const feedUrl = `${CONFIG.NEWS.FEED_URL}${sep}_t=${bust}`;
-    const res = await fetch(CONFIG.NEWS.CONVERTER + encodeURIComponent(feedUrl), { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    if (data.status !== "ok" || !Array.isArray(data.items)) {
-      throw new Error("RSS変換サービスの応答が不正");
+    const results = await Promise.allSettled(CONFIG.NEWS.FEEDS.map(fetchNewsFeed));
+    const all = [];
+    for (const r of results) {
+      if (r.status === "fulfilled") all.push(...r.value);
     }
-    newsItems = data.items
-      .slice(0, CONFIG.NEWS.MAX_ITEMS)
-      .map((item) => ({
-        title: (item.title || "").trim(),
-        link: (item.link || "").trim(),
-        pubDate: (item.pubDate || "").trim(),
-        thumbnail: (item.thumbnail || (item.enclosure && item.enclosure.link) || "").trim(),
-      }))
-      .filter((item) => item.title);
+    if (all.length === 0) throw new Error("全フィードの取得に失敗");
+    const seen = new Set();
+    newsItems = all
+      .filter((item) => {
+        if (!item.link || seen.has(item.link)) return false;
+        seen.add(item.link);
+        return true;
+      })
+      .sort((a, b) => {
+        const da = parseNewsDate(a.pubDate);
+        const db = parseNewsDate(b.pubDate);
+        return (db ? db.getTime() : 0) - (da ? da.getTime() : 0);
+      })
+      .slice(0, CONFIG.NEWS.MAX_ITEMS);
     newsIndex = 0;
     renderNewsItem();
     startNewsRotation();
   } catch (err) {
-    console.warn("グルメニュースの取得に失敗（ティッカー非表示で継続）:", err.message);
+    console.warn("グルメニュースの取得に失敗（カード非表示で継続）:", err.message);
     if (newsItems.length === 0) renderNewsItem(); // 初回失敗時は確実に非表示へ
   }
 }
@@ -789,6 +823,7 @@ function undoPattern() {
  * ===================================================================== */
 
 let scene, camera, renderer;
+let controls = null; // OrbitControls（ピンチズーム・ドラッグ回転。未読込なら固定カメラ）
 let bowlGroup, eggMesh;
 /** 卵のマテリアル（生=光沢オレンジ／温玉=白濁。buildBowl()で生成） */
 const EGG_MATERIALS = {};
@@ -882,6 +917,13 @@ async function loadModels() {
     for (const g of [bowl, mound, meat, onion]) {
       g.traverse((o) => { if (o.isMesh) o.material.side = THREE.DoubleSide; });
     }
+    // 肉のテカリを抑える（つやつや→煮肉のマットな質感）
+    meat.traverse((o) => {
+      if (o.isMesh && o.material) {
+        o.material.roughness = 0.9;
+        o.material.metalness = 0;
+      }
+    });
     return { bowl, mound, meat, onion };
   } catch (err) {
     console.warn("3Dモデルの読込に失敗（プリミティブ表示で継続）:", err.message);
@@ -921,6 +963,20 @@ function initScene() {
     46, container.clientWidth / container.clientHeight, 0.1, 100);
   camera.position.set(0, 1.5, 4.2);
   camera.lookAt(0, 1.35, 0);
+
+  // ピンチズーム・ドラッグ回転（読込失敗時は固定カメラのまま）
+  if (THREE.OrbitControls) {
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1.35, 0);
+    controls.enablePan = false;      // 構図が壊れるためパンは無効
+    controls.enableDamping = true;   // 慣性でぐりぐり感を出す
+    controls.dampingFactor = 0.08;
+    controls.minDistance = 2.8;      // ズームイン限界
+    controls.maxDistance = 7;        // ズームアウト限界
+    controls.minPolarAngle = 1.1;    // 見下ろしすぎ防止
+    controls.maxPolarAngle = 1.75;   // 丼の裏側は見せない
+    controls.update();
+  }
 
   // ライト: 温かみのある光で食欲と安心感を演出（設計書5-5）
   scene.add(new THREE.AmbientLight(0x40465e, 1.1));
@@ -1022,6 +1078,7 @@ function buildBowl(lowSpec) {
 
   toppingMeats = [];
   toppingOnions = [];
+  const GOLDEN = 2.39996; // 黄金角。少数表示でも全方位にまんべんなく散らばる
   for (let i = 0; i < 16; i++) {
     let piece;
     if (meatGeomProcessed) {
@@ -1032,26 +1089,28 @@ function buildBowl(lowSpec) {
     }
     let px, pz, lift;
     if (i < 10) {
-      const a = (i / 10) * Math.PI * 2 + 0.4;
-      const r = 0.3 + (i % 3) * 0.17;
+      // 基本の10枚: 黄金角の螺旋で盛り全体にまんべんなく配置
+      const a = i * GOLDEN;
+      const r = 0.28 + 0.45 * Math.sqrt((i + 0.5) / 10);
       px = Math.cos(a) * r;
       pz = Math.sin(a) * r;
-      lift = 0.02;
+      lift = 0.035;
     } else {
-      const a = ((i - 10) / 6) * Math.PI * 2 + 1.1;
-      const r = 0.12 + ((i - 10) % 2) * 0.12;
+      // 追加の6枚: 中央に積み上げ（肉多めの日の山盛り）
+      const a = (i - 10) * GOLDEN + 1.1;
+      const r = 0.1 + ((i - 10) % 2) * 0.13;
       px = Math.cos(a) * r;
       pz = Math.sin(a) * r;
-      lift = 0.05 + (i - 10) * 0.02; // 中央に積み上げ（山盛り）
+      lift = 0.06 + (i - 10) * 0.022;
     }
-    piece.rotation.set(0.25 * Math.sin(i * 7), (i / 16) * Math.PI * 2, 0.15 * Math.cos(i * 5));
+    piece.rotation.set(0.25 * Math.sin(i * 7), i * GOLDEN, 0.15 * Math.cos(i * 5));
     piece.position.set(px, moundY(Math.hypot(px, pz), px, pz) + lift, pz);
     bowlGroup.add(piece);
     toppingMeats.push(piece);
   }
   for (let i = 0; i < 10; i++) {
-    const a = (i / 10) * Math.PI * 2 + 0.7;
-    const r = 0.36 + (i % 3) * 0.13;
+    const a = i * GOLDEN + 0.7;
+    const r = 0.3 + 0.4 * Math.sqrt((i + 0.5) / 10);
     let strip;
     if (onionSrc) {
       strip = onionSrc.clone();
@@ -1063,7 +1122,7 @@ function buildBowl(lowSpec) {
     }
     const px = Math.cos(a) * r;
     const pz = Math.sin(a) * r;
-    strip.position.set(px, moundY(r, px, pz) + 0.02, pz);
+    strip.position.set(px, moundY(r, px, pz) + 0.03, pz);
     bowlGroup.add(strip);
     toppingOnions.push(strip);
   }
@@ -1495,6 +1554,9 @@ function animate(t) {
   updateEffects();
   updateBgParticles(dt);
   updateParticles(dt, tSec);
+  // 丼をゆっくり自動回転（約2分で1周）。操作系（OrbitControls）の慣性も毎フレーム更新
+  if (bowlGroup) bowlGroup.rotation.y += CONFIG.BOWL_ROTATE_SPEED * dt;
+  if (controls) controls.update();
   renderer.render(scene, camera);
 }
 

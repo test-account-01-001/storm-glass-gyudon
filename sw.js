@@ -11,11 +11,12 @@
  *   - 天気API（Open-Meteo）: ネット優先 → 失敗時キャッシュ（オフラインで前回値を表示）
  */
 
-const CACHE_VERSION = "v0.18-1";
+const CACHE_VERSION = "v0.19-1";
 const CACHE_NAME = `storm-gyudon-${CACHE_VERSION}`;
 
 const THREE_CDN = "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js";
 const GLTF_LOADER_CDN = "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js";
+const ORBIT_CONTROLS_CDN = "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js";
 
 const PRECACHE_URLS = [
   "./",
@@ -39,6 +40,7 @@ const PRECACHE_URLS = [
   "./assets/models/gyudon_tamanegi.glb",
   THREE_CDN,
   GLTF_LOADER_CDN,
+  ORBIT_CONTROLS_CDN,
 ];
 
 self.addEventListener("install", (event) => {
